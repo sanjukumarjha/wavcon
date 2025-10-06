@@ -4,6 +4,7 @@
   "description": "A Node.js server for media processing and streaming",
   "main": "index.js",
   "scripts": {
+    "postinstall": "apt-get update && apt-get install -y python3",
     "start": "node index.js",
     "dev": "nodemon index.js"
   },

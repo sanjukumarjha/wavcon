@@ -1,53 +1,50 @@
-// server.js
 const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const play = require('play-dl');
 const fs = require('fs');
-const path = require('path');
 const axios = require('axios');
+const ytdlp = require('yt-dlp-exec');
+const path = require('path'); // Needed for handling file paths
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
-
 const app = express();
 const port = process.env.PORT || 3001;
 
-// CORS
 app.use(cors({
   origin: 'https://wavcon.vercel.app'
 }));
-app.use(express.json());
 
-// Axios retry
-axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
+axiosRetry(axios, {
+    retries: 3,
+    retryDelay: axiosRetry.exponentialDelay,
+});
 
-// Temporary directory
-const tempDir = path.join(__dirname, '.data');
-if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+// --- DEFINITIVE FIX: Setup for temporary file downloads ---
+const tempDir = path.join(__dirname, 'tmp');
+if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir);
+}
 
-// YouTube helper to refresh client data
-const refreshYouTubeTokens = async () => {
-    try {
-        console.log('Refreshing YouTube client data...');
-        await play.getFreeClientID();
-        console.log('YouTube client refreshed.');
-    } catch (err) {
-        console.error('Failed to refresh YouTube client:', err.message);
-    }
+const cookiesPath = "./cookies.txt";
+const useCookies = fs.existsSync(cookiesPath);
+
+let spotifyToken = {
+    value: null,
+    expirationTime: 0,
 };
 
-// Spotify token handling
-let spotifyToken = { value: null, expirationTime: 0 };
 const getSpotifyToken = async () => {
-    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) return spotifyToken.value;
-
+    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
+        return spotifyToken.value;
+    }
     const clientId = process.env.SPOTIFY_CLIENT_ID;
     const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-    if (!clientId || !clientSecret) throw new Error('Spotify credentials missing');
-
+    if (!clientId || !clientSecret) throw new Error('Spotify credentials not configured.');
+    
     const authOptions = {
         url: 'https://accounts.spotify.com/api/token',
         method: 'post',
@@ -57,115 +54,156 @@ const getSpotifyToken = async () => {
         },
         data: 'grant_type=client_credentials',
     };
-
-    const response = await axios(authOptions);
-    spotifyToken.value = response.data.access_token;
-    spotifyToken.expirationTime = Date.now() + (response.data.expires_in - 60) * 1000;
-    console.log('Spotify token acquired.');
-    return spotifyToken.value;
+    try {
+        const response = await axios(authOptions);
+        spotifyToken.value = response.data.access_token;
+        spotifyToken.expirationTime = Date.now() + (response.data.expires_in - 60) * 1000;
+        console.log('Successfully authenticated with Spotify.');
+        return spotifyToken.value;
+    } catch (error) {
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
+        throw new Error('Spotify authentication failed.');
+    }
 };
 
-// Fetch Spotify track details
+const findAppleMusicArtwork = async (track) => {
+    try {
+        const upc = track.album?.external_ids?.upc;
+        if (upc) {
+            const response = await axios.get(`https://itunes.apple.com/lookup?upc=${upc}&entity=album`);
+            if (response.data.resultCount > 0) return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
+        }
+    } catch (e) { /* Fallback */ }
+    try {
+        const searchTerm = `${track.album.name} ${track.artists[0].name}`;
+        const response = await axios.get(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=1`);
+        if (response.data.results.length > 0) return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
+    } catch (e) { /* No artwork found */ }
+    return null;
+};
+
 const getSpotifyTrackDetails = async (trackId) => {
     const token = await getSpotifyToken();
-    const response = await axios.get(`https://api.spotify.com/v1/tracks/${trackId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-    });
+    const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
+    const response = await axios.get(trackUrl, { headers: { 'Authorization': `Bearer ${token}` } });
     const track = response.data;
+    
     return {
         title: track.name,
         subtitle: track.artists.map(a => a.name).join(', '),
-        duration_ms: track.duration_ms,
+        thumbnail: track.album.images[0]?.url,
+        poster: await findAppleMusicArtwork(track),
+        platform: 'spotify',
+        duration_ms: track.duration_ms, 
     };
 };
 
-// --- GET MEDIA DATA ---
+app.use(express.json());
+
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
-        if (!url) return res.status(400).json({ error: 'URL is required' });
+        if (!url) return res.status(400).json({ error: 'URL is required.' });
 
         if (url.includes('spotify.com/track/')) {
-            const trackId = url.match(/track\/([a-zA-Z0-9]+)/)?.[1];
-            if (!trackId) return res.status(400).json({ error: 'Invalid Spotify track URL' });
-            res.json(await getSpotifyTrackDetails(trackId));
+            const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
+            if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
+            res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const info = await play.video_info(url);
-            const details = info.video_details;
-            res.json({
-                title: details.title,
-                subtitle: details.channel?.name,
-                thumbnail: details.thumbnails.pop()?.url,
-                platform: 'youtube'
-            });
+            const details = await ytdlp(url, { dumpSingleJson: true, noPlaylist: true });
+            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: details.thumbnail, platform: 'youtube' });
         } else {
-            res.status(400).json({ error: 'Unsupported URL' });
+            res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
     } catch (err) {
-        console.error(err.stack);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error("--- FATAL ERROR in /api/get-media-data ---", err.stack);
+        res.status(500).json({ error: 'An internal server error occurred.' });
     }
 });
 
-// --- CONVERT ENDPOINT ---
+// --- DEFINITIVE /api/convert ENDPOINT ---
 app.post('/api/convert', async (req, res) => {
+    let tempFilePath = null; // Keep track of the temp file
     try {
         const { url, title } = req.body;
-        if (!url) return res.status(400).json({ error: 'URL is required' });
+        if (!url) return res.status(400).json({ error: 'URL is required.' });
 
-        let videoUrl = url;
-        let streamTitle = title || 'audio';
-
-        // Spotify -> search YouTube for matching video
+        let videoUrl, streamTitle;
         if (url.includes('spotify.com/track/')) {
-            const trackId = url.match(/track\/([a-zA-Z0-9]+)/)?.[1];
-            if (!trackId) throw new Error('Invalid Spotify URL');
+            const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
+            if (!trackIdMatch) throw new Error('Invalid Spotify URL.');
+            
+            const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
+            streamTitle = trackDetails.title;
+            const spotifyDurationSec = trackDetails.duration_ms / 1000;
+            const artistName = trackDetails.subtitle;
+            const searchQuery = `${trackDetails.title} ${artistName}`;
+            
+            const yt_videos = await play.search(searchQuery, { limit: 5 });
+            if (yt_videos.length === 0) throw new Error('Could not find a match on YouTube.');
 
-            const track = await getSpotifyTrackDetails(trackId);
-            streamTitle = track.title;
-            const searchQuery = `${track.title} ${track.subtitle}`;
-            const ytVideos = await play.search(searchQuery, { limit: 5 });
-            if (!ytVideos.length) throw new Error('No matching YouTube video found');
-            videoUrl = ytVideos[0].url;
+            let bestMatch = yt_videos.reduce((prev, curr) => 
+                (Math.abs(curr.durationInSec - spotifyDurationSec) < Math.abs(prev.durationInSec - spotifyDurationSec) ? curr : prev)
+            );
+            videoUrl = bestMatch.url;
+        } else {
+            streamTitle = title;
+            videoUrl = url;
         }
 
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
-        const tempMp3 = path.join(tempDir, `${sanitizedTitle}.mp3`);
-        const tempWav = path.join(tempDir, `${sanitizedTitle}.wav`);
-
-        console.log(`[CONVERT] Downloading audio: ${sanitizedTitle}`);
-        const stream = await play.stream(videoUrl);
-        const fileStream = fs.createWriteStream(tempMp3);
-
-        await new Promise((resolve, reject) => {
-            stream.stream.pipe(fileStream);
-            stream.stream.on('end', resolve);
-            stream.stream.on('error', reject);
+        
+        // --- FIX: Download to a temporary file first to save memory ---
+        tempFilePath = path.join(tempDir, `${Date.now()}.tmp`);
+        console.log(`[CONVERT] Downloading audio to temporary file: ${tempFilePath}`);
+        
+        await ytdlp.exec(videoUrl, {
+            format: 'bestaudio[ext=m4a]/bestaudio', // m4a is a good intermediate format
+            output: tempFilePath,
+            cookies: useCookies ? cookiesPath : undefined,
         });
 
-        console.log(`[FFMPEG] Converting to WAV: ${sanitizedTitle}`);
-        await new Promise((resolve, reject) => {
-            ffmpeg(tempMp3)
-                .toFormat('wav')
-                .audioFrequency(48000)
-                .on('error', reject)
-                .on('end', resolve)
-                .save(tempWav);
-        });
+        console.log(`[CONVERT] Download complete. Starting FFMPEG conversion.`);
 
-        res.download(tempWav, `${sanitizedTitle}.wav`, () => {
-            fs.unlinkSync(tempMp3);
-            fs.unlinkSync(tempWav);
-        });
+        res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
+        res.setHeader('Content-Type', 'audio/wav');
+        
+        ffmpeg(tempFilePath) // Use the temporary file as input
+            .audioBitrate(128)
+            .toFormat('wav')
+            .audioFrequency(48000)
+            .on('error', (err, stdout, stderr) => {
+                console.error("--- FFMPEG ERROR ---", err.message);
+                console.error("[FFMPEG STDERR]:", stderr);
+                if (!res.headersSent) res.status(500).send('Error during conversion');
+            })
+            .on('end', () => {
+                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
+                // Clean up the temporary file on success
+                if (fs.existsSync(tempFilePath)) {
+                    fs.unlinkSync(tempFilePath);
+                }
+            })
+            .pipe(res, { end: true });
 
     } catch (err) {
-        console.error("Conversion error:", err.stack);
-        res.status(500).send('Conversion failed');
+        console.error("--- TOP LEVEL CONVERSION ERROR ---", err.stack);
+        // Clean up the temporary file on error
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
+        if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
     }
 });
 
-// --- START SERVER ---
+app.get('/api/download-image', (req, res) => { /* ... unchanged ... */ });
+
 app.listen(port, async () => {
-    console.log(`Server running on port ${port}`);
-    await refreshYouTubeTokens();
+    console.log(`Server is running on http://localhost:${port}`);
+    try {
+        await getSpotifyToken();
+    } catch (error) {
+        console.error("Failed to pre-warm Spotify token, will try again on first request.");
+    }
+    console.log("Server initialized and listening.");
 });

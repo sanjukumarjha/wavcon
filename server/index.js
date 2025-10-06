@@ -5,15 +5,15 @@ const ffmpegPath = require('ffmpeg-static');
 const play = require('play-dl');
 const fs = require('fs');
 const axios = require('axios');
-const { spawn } = require('child_process');
+const ytdlpExec = require('yt-dlp-exec'); // Node wrapper, no external binary needed
 require('dotenv').config();
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const app = express();
-const port = process.env.PORT || 3001; // Use Render port
+const port = process.env.PORT || 3001;
 
-const cookiesPath = "./cookies.txt"; // relative path
+const cookiesPath = "./cookies.txt"; // Relative path for Render
 const useCookies = fs.existsSync(cookiesPath);
 
 let spotifyToken = {
@@ -21,6 +21,7 @@ let spotifyToken = {
     expirationTime: 0,
 };
 
+// Spotify authentication
 const getSpotifyToken = async () => {
     if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) return spotifyToken.value;
 
@@ -54,6 +55,7 @@ const getSpotifyToken = async () => {
     }
 };
 
+// Get high-resolution artwork from Apple Music
 const findAppleMusicArtwork = async (track) => {
     const upc = track.album.external_ids?.upc;
     if (upc) {
@@ -80,6 +82,7 @@ const findAppleMusicArtwork = async (track) => {
     return null;
 };
 
+// Get Spotify track details
 const getSpotifyTrackDetails = async (trackId) => {
     const token = await getSpotifyToken();
     const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
@@ -164,13 +167,16 @@ app.post('/api/convert', async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
 
-        console.log(`[yt-dlp] Streaming audio from: ${videoUrl}`);
-        const ytdlpArgs = ['-f', 'bestaudio', '-o', '-', videoUrl];
-        if (useCookies) ytdlpArgs.splice(1, 0, '--cookies', cookiesPath);
+        console.log(`[yt-dlp-exec] Fetching audio stream for: ${videoUrl}`);
 
-        const ytdlpProcess = spawn('yt-dlp', ytdlpArgs, { stdio: ['ignore', 'pipe', 'inherit'] });
+        const audioStream = ytdlpExec(videoUrl, {
+            format: 'bestaudio',
+            output: '-',               // stream to stdout
+            cookiefile: useCookies ? cookiesPath : undefined,
+            quiet: true
+        }, { stdio: ['ignore', 'pipe', 'inherit'] });
 
-        ffmpeg(ytdlpProcess.stdout)
+        ffmpeg(audioStream.stdout)
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)

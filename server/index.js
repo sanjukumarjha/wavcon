@@ -15,13 +15,8 @@ const app = express();
 const port = process.env.PORT || 3001;
 
 app.use(cors({
-  origin: ['https://wavcon.vercel.app', 'http://localhost:5173'],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: false
+  origin: 'https://wavcon.vercel.app'
 }));
-
-app.options(/.*/, cors());
 
 // --- Apply retry logic GLOBALLY to all axios requests ---
 axiosRetry(axios, {

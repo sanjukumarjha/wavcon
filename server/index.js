@@ -7,30 +7,13 @@ const fs = require('fs');
 const axios = require('axios');
 const ytdlp = require('yt-dlp-exec');
 require('dotenv').config();
-// --- THIS IS THE FIX: Correctly import the axios-retry function ---
-const { default: axiosRetry } = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-const port = process.env.PORT || 3001;
+const port = 3001;
 
-app.use(cors({
-  origin: 'https://wavcon.vercel.app'
-}));
+const cookiesPath = "C:\\Users\\rjriv\\Downloads\\Websites Work\\WAV\\server\\cookies.txt";
 
-// Apply retry logic GLOBALLY to all axios requests
-axiosRetry(axios, {
-    retries: 3,
-    retryDelay: (retryCount) => {
-        console.log(`Request failed, attempt #${retryCount}. Retrying in ${retryCount * 2}s...`);
-        return retryCount * 2000;
-    },
-    retryCondition: (error) => {
-        return axiosRetry.isNetworkOrIdempotentRequestError(error) || (error.response && error.response.status >= 500);
-    },
-});
-
-const cookiesPath = "./cookies.txt"; 
 const useCookies = fs.existsSync(cookiesPath);
 
 let spotifyToken = {
@@ -58,7 +41,7 @@ const getSpotifyToken = async () => {
         data: 'grant_type=client_credentials',
     };
     try {
-        const response = await axios(authOptions); 
+        const response = await axios(authOptions);
         const token = response.data.access_token;
         const expiresIn = response.data.expires_in;
         spotifyToken.value = token;
@@ -66,7 +49,7 @@ const getSpotifyToken = async () => {
         console.log('Successfully authenticated with Spotify.');
         return token;
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY AFTER RETRIES !!!");
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
         throw new Error('Spotify authentication failed.');
     }
 };
@@ -107,7 +90,7 @@ const getSpotifyTrackDetails = async (trackId) => {
 
     return {
         title: track.name,
-        subtitle: track.artists.map(a => a.name).join(', '),
+        subtitle: track.artists.map(a => a.name).join(', '), // Handle multiple artists
         thumbnail: standardThumbnail,
         poster: highResPosterUrl,
         platform: 'spotify',
@@ -115,9 +98,11 @@ const getSpotifyTrackDetails = async (trackId) => {
     };
 };
 
+app.use(cors());
 app.use(express.json());
 
 app.post('/api/get-media-data', async (req, res) => {
+    // This endpoint remains the same and does not need the duration
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required.' });
     try {
@@ -151,6 +136,7 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
+// --- UPDATED CONVERT ENDPOINT ---
 app.post('/api/convert', async (req, res) => {
     const { url, title } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required.' });
@@ -161,88 +147,89 @@ app.post('/api/convert', async (req, res) => {
             const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
             if (!trackIdMatch) throw new Error('Invalid Spotify URL for conversion.');
             
+            // --- NEW: Advanced song matching logic with scoring ---
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             streamTitle = trackDetails.title;
             const spotifyDurationSec = trackDetails.duration_ms / 1000;
             const artistName = trackDetails.subtitle;
-            const searchQuery = `${trackDetails.title} ${artistName}`;
-            
-            console.log(`Searching YouTube for: "${searchQuery}" (Original duration: ${spotifyDurationSec.toFixed(2)}s)`);
-            const yt_videos = await play.search(searchQuery, { limit: 10 });
-            
-            if (yt_videos.length === 0) throw new Error('Could not find any videos on YouTube.');
+            const primarySearchQuery = `${trackDetails.title} ${artistName}`;
+            const officialAudioQuery = `${primarySearchQuery} official audio`;
 
-            const DURATION_TOLERANCE_SEC = 7;
-            const potentialMatches = yt_videos.filter(video =>
-                Math.abs(spotifyDurationSec - video.durationInSec) < DURATION_TOLERANCE_SEC
-            );
+            console.log(`Searching YouTube for: "${officialAudioQuery}" (Original duration: ${spotifyDurationSec.toFixed(2)}s)`);
+            let yt_videos = await play.search(officialAudioQuery, { limit: 3 });
+
+            if (yt_videos.length === 0) {
+                console.log(`"Official audio" search failed. Falling back to general search: "${primarySearchQuery}"`);
+                yt_videos = await play.search(primarySearchQuery, { limit: 5 });
+            }
+            
+            if (yt_videos.length === 0) throw new Error('Could not find a matching video on YouTube.');
 
             let bestMatch = null;
-            if (potentialMatches.length === 0) {
-                 console.log("No matches within tolerance, finding closest duration from original list.");
-                 let closestVideo = yt_videos[0];
-                 let smallestDiff = Math.abs(spotifyDurationSec - yt_videos[0].durationInSec);
-                 for(const video of yt_videos.slice(1)) {
-                     const diff = Math.abs(spotifyDurationSec - video.durationInSec);
-                     if (diff < smallestDiff) {
-                         smallestDiff = diff;
-                         closestVideo = video;
-                     }
-                 }
-                 bestMatch = closestVideo;
-            } else {
-                let highestScore = -Infinity;
-                for (const video of potentialMatches) {
-                    let score = 0;
-                    const videoTitle = video.title.toLowerCase();
-                    const artistNameLower = artistName.toLowerCase();
+            let highestScore = -Infinity;
 
-                    if (video.channel && video.channel.name.toLowerCase().includes(artistNameLower)) score += 20;
-                    if (videoTitle.includes("official audio")) score += 15;
-                    if (videoTitle.includes("lyrics") || videoTitle.includes("lyric video")) score += 5;
-                    if (videoTitle.includes(artistNameLower)) score += 5;
-                    if (videoTitle.includes("live") || videoTitle.includes("cover") || videoTitle.includes("remix") || videoTitle.includes("reaction") || videoTitle.includes("afterlife") || videoTitle.includes("lofi")) score -= 30;
-                    score -= Math.abs(spotifyDurationSec - video.durationInSec);
-                    
-                    if (score > highestScore) {
-                        highestScore = score;
-                        bestMatch = video;
-                    }
+            console.log('--- Scoring YouTube Results ---');
+
+            for (const video of yt_videos) {
+                let score = 0;
+                const videoTitle = video.title.toLowerCase();
+                const artistNameLower = artistName.toLowerCase();
+
+                // 1. Duration Scoring (Higher score for smaller difference)
+                const durationDiff = Math.abs(spotifyDurationSec - video.durationInSec);
+                if (durationDiff < 10) { // Only score if within a reasonable 10-second range
+                    score += (10 - durationDiff);
                 }
-                if (!bestMatch) bestMatch = potentialMatches[0];
+
+                // 2. Title Keyword Scoring
+                if (videoTitle.includes("official audio")) score += 15;
+                if (videoTitle.includes("lyrics") || videoTitle.includes("lyric video")) score += 10;
+                if (videoTitle.includes(artistNameLower)) score += 5; // Bonus if artist name is in title
+                
+                // 3. Penalty for unwanted keywords
+                if (videoTitle.includes("live") || videoTitle.includes("cover") || videoTitle.includes("remix") || videoTitle.includes("reaction")) {
+                    score -= 20;
+                }
+                
+                console.log(`  - Video: "${video.title}" (Duration: ${video.durationInSec}s, Diff: ${durationDiff.toFixed(2)}s, Score: ${score.toFixed(2)})`);
+
+                if (score > highestScore) {
+                    highestScore = score;
+                    bestMatch = video;
+                }
             }
+            
+            if (!bestMatch) {
+                bestMatch = yt_videos[0]; // Safe fallback, should not be needed
+            }
+            
+            console.log(`--- Best match selected (Score: ${highestScore.toFixed(2)}): "${bestMatch.title}" ---`);
             videoUrl = bestMatch.url;
-        } else {
+
+        } else { // YouTube URL
             streamTitle = title;
-            const videoIdMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11}).*/);
-            if (!videoIdMatch || !videoIdMatch[1]) {
-                throw new Error("Could not extract a valid YouTube video ID from the provided URL.");
-            }
-            const videoId = videoIdMatch[1];
-            videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+            videoUrl = url;
         }
 
+        console.log(`Fetching direct audio URL with ytdlp for: ${videoUrl}`);
+        const audioInfo = await ytdlp(videoUrl, {
+            dumpSingleJson: true,
+            format: 'bestaudio/best',
+            cookies: useCookies ? cookiesPath : undefined,
+        });
+
+        if (!audioInfo.url) throw new Error('ytdlp failed to extract a direct audio URL.');
+        
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
         
         console.log(`[FFMPEG] Starting .wav conversion for: ${sanitizedTitle}`);
-        
-        const stream = await play.stream(videoUrl, { 
-            discordPlayerCompatibility: true
-        });
-        
-        ffmpeg(stream.stream)
-            .audioBitrate(128)
-            .toFormat('wav')
-            .audioFrequency(48000)
-            .on('error', (err) => {
-                console.error("--- FFMPEG ERROR ---", err.message);
-                if (!res.headersSent) res.status(500).send('Error during conversion');
-            })
+        ffmpeg(audioInfo.url)
+            .audioBitrate(128).toFormat('wav').audioFrequency(48000)
+            .on('error', (err) => console.error("--- FFMPEG ERROR ---", err.message))
             .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
             .pipe(res, { end: true });
-
     } catch (err) {
         console.error("--- CONVERSION ERROR ---", err.message);
         if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
@@ -250,12 +237,12 @@ app.post('/api/convert', async (req, res) => {
 });
 
 app.get('/api/download-image', async (req, res) => {
+    // This endpoint remains the same
     const { url, title, type } = req.query;
     if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
     try {
         const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
-        const suffix = type === 'poster' ? '_poster' : '_thumbnail';
-        const filename = `${sanitizedTitle}${suffix}.jpg`;
+        const filename = `${sanitizedTitle}_${type}.jpg`;
         const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.setHeader('Content-Type', 'image/jpeg');
@@ -268,7 +255,6 @@ app.get('/api/download-image', async (req, res) => {
 
 app.listen(port, () => {
     console.log(`Server is running on http://localhost:${port}`);
-    getSpotifyToken().catch(() => {
-        console.log("Could not pre-warm Spotify token.");
-    });
+    getSpotifyToken().catch(() => console.log("Could not pre-warm Spotify token."));
 });
+

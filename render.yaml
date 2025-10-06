@@ -1,7 +1,6 @@
 services:
   - type: web
     name: wav-converter-backend
-    env: node
     plan: free
     region: oregon # You can change this to a region closer to you if you like
     rootDir: server

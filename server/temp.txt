@@ -1,0 +1,240 @@
+const express = require('express');
+const cors = require('cors');
+const ffmpeg = require('fluent-ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
+const play = require('play-dl');
+const fs = require('fs');
+const axios = require('axios');
+const ytdlp = require('yt-dlp-exec');
+require('dotenv').config();
+
+ffmpeg.setFfmpegPath(ffmpegPath);
+const app = express();
+const port = 3001;
+
+const cookiesPath = "C:\\Users\\akhil\\Downloads\\WAV\\server\\cookies.txt";
+const useCookies = fs.existsSync(cookiesPath);
+
+let spotifyToken = {
+    value: null,
+    expirationTime: 0,
+};
+
+const getSpotifyToken = async () => {
+    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
+        return spotifyToken.value;
+    }
+    console.log('Authenticating with Spotify...');
+    const clientId = process.env.SPOTIFY_CLIENT_ID;
+    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+    if (!clientId || !clientSecret) {
+        throw new Error('Spotify credentials are not configured in the .env file.');
+    }
+    const authOptions = {
+        url: 'https://accounts.spotify.com/api/token',
+        method: 'post',
+        headers: {
+            'Authorization': 'Basic ' + (Buffer.from(clientId + ':' + clientSecret).toString('base64')),
+            'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        data: 'grant_type=client_credentials',
+    };
+    try {
+        const response = await axios(authOptions);
+        const token = response.data.access_token;
+        const expiresIn = response.data.expires_in;
+        spotifyToken.value = token;
+        spotifyToken.expirationTime = Date.now() + (expiresIn - 60) * 1000;
+        console.log('Successfully authenticated with Spotify.');
+        return token;
+    } catch (error) {
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
+        throw new Error('Spotify authentication failed.');
+    }
+};
+
+// --- NEW: Heavily improved artwork search function ---
+const findAppleMusicArtwork = async (track) => {
+    const upc = track.album.external_ids?.upc;
+    
+    // 1. Try UPC lookup first (most accurate)
+    if (upc) {
+        try {
+            console.log(`Searching Apple Music by UPC: ${upc}`);
+            const lookupUrl = `https://itunes.apple.com/lookup?upc=${upc}&entity=album`;
+            const response = await axios.get(lookupUrl);
+            if (response.data.resultCount > 0) {
+                const artworkUrl = response.data.results[0].artworkUrl100;
+                if (artworkUrl) {
+                    const highResUrl = artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
+                    console.log(`Found high-res artwork via UPC: ${highResUrl}`);
+                    return highResUrl;
+                }
+            }
+        } catch (error) {
+            console.log('UPC lookup failed, falling back to text search.');
+        }
+    }
+
+    // 2. Fallback to text search if UPC fails or doesn't exist
+    const albumName = track.album.name;
+    const artistName = track.artists[0].name;
+    try {
+        const searchTerm = `${albumName} ${artistName}`;
+        console.log(`Searching Apple Music by text: "${searchTerm}"`);
+        const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=5`;
+        const response = await axios.get(searchUrl);
+        const results = response.data.results;
+        if (results.length === 0) {
+            console.log('No matching album found on Apple Music via text search.');
+            return null;
+        }
+        const bestMatch = results.find(r => 
+            r.collectionName.toLowerCase() === albumName.toLowerCase() &&
+            r.artistName.toLowerCase() === artistName.toLowerCase()
+        );
+        const result = bestMatch || results[0];
+        const artworkUrl = result.artworkUrl100;
+        if (!artworkUrl) return null;
+        const highResUrl = artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
+        console.log(`Found high-res artwork via text search: ${highResUrl}`);
+        return highResUrl;
+    } catch (error) {
+        console.error('Text search for Apple Music artwork failed:', error.message);
+        return null;
+    }
+};
+
+const getSpotifyTrackDetails = async (trackId) => {
+    const token = await getSpotifyToken();
+    const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
+    const response = await axios.get(trackUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+    const track = response.data;
+    const standardThumbnail = track.album.images[0]?.url;
+
+    const highResPosterUrl = await findAppleMusicArtwork(track);
+
+    return {
+        title: track.name,
+        subtitle: track.artists[0]?.name || 'Unknown Artist',
+        thumbnail: standardThumbnail, // 640x640 for display
+        poster: highResPosterUrl, // This will be null if not found
+        platform: 'spotify',
+    };
+};
+
+app.use(cors());
+app.use(express.json());
+
+app.post('/api/get-media-data', async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL is required.' });
+
+    try {
+        if (url.includes('spotify.com/track/')) {
+            const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
+            if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
+            const trackId = trackIdMatch[1];
+            const trackDetails = await getSpotifyTrackDetails(trackId);
+            console.log(`Fetched Spotify metadata for: ${trackDetails.title}`);
+            res.json(trackDetails);
+        } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            const info = await play.video_info(url);
+            const details = info.video_details;
+            const videoId = details.id;
+            let bestThumbnailUrl = details.thumbnails[details.thumbnails.length - 1]?.url;
+            if (videoId) {
+                const potentialThumbnails = [
+                    `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+                    `https://i.ytimg.com/vi/${videoId}/hq720.jpg`,
+                ];
+                for (const thumbUrl of potentialThumbnails) {
+                    try {
+                        await axios.head(thumbUrl);
+                        bestThumbnailUrl = thumbUrl;
+                        break;
+                    } catch (e) { /* ignore */ }
+                }
+            }
+            res.json({
+                title: details.title || 'Untitled',
+                subtitle: details.channel?.name || 'Unknown',
+                thumbnail: bestThumbnailUrl,
+                platform: 'youtube',
+            });
+        } else {
+            res.status(400).json({ error: 'Invalid or unsupported URL.' });
+        }
+    } catch (err) {
+        console.error("--- ERROR FETCHING MEDIA DATA ---", err.message);
+        res.status(500).json({ error: 'Failed to fetch media data.' });
+    }
+});
+
+app.post('/api/convert', async (req, res) => {
+    const { url, title } = req.body;
+    if (!url) return res.status(400).json({ error: 'URL is required.' });
+
+    try {
+        let videoUrl, streamTitle;
+        if (url.includes('spotify.com/track/')) {
+            const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
+            if (!trackIdMatch) throw new Error('Invalid Spotify URL for conversion.');
+            const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
+            streamTitle = trackDetails.title;
+            const searchQuery = `${trackDetails.title} ${trackDetails.subtitle} audio`;
+            console.log(`Searching YouTube for: "${searchQuery}"`);
+            const yt_videos = await play.search(searchQuery, { limit: 1 });
+            if (yt_videos.length === 0) throw new Error('Could not find a matching video on YouTube.');
+            videoUrl = yt_videos[0].url;
+        } else {
+            streamTitle = title;
+            videoUrl = url;
+        }
+
+        console.log(`Fetching direct audio URL with ytdlp for: ${videoUrl}`);
+        const audioInfo = await ytdlp(videoUrl, {
+            dumpSingleJson: true,
+            format: 'bestaudio/best',
+            cookies: useCookies ? cookiesPath : undefined,
+        });
+
+        if (!audioInfo.url) throw new Error('ytdlp failed to extract a direct audio URL.');
+        
+        const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
+        res.setHeader('Content-Type', 'audio/wav');
+        
+        console.log(`[FFMPEG] Starting .wav conversion for: ${sanitizedTitle}`);
+        ffmpeg(audioInfo.url)
+            .audioBitrate(128).toFormat('wav').audioFrequency(48000)
+            .on('error', (err) => console.error("--- FFMPEG ERROR ---", err.message))
+            .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
+            .pipe(res, { end: true });
+    } catch (err) {
+        console.error("--- CONVERSION ERROR ---", err.message);
+        if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
+    }
+});
+
+app.get('/api/download-image', async (req, res) => {
+    const { url, title, type } = req.query;
+    if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
+    try {
+        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const filename = `${sanitizedTitle}_${type}.jpg`;
+        const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'image/jpeg');
+        response.data.pipe(res);
+    } catch (err) {
+        console.error("--- IMAGE DOWNLOAD PROXY ERROR ---", err.message);
+        res.status(500).send('Failed to download image.');
+    }
+});
+
+app.listen(port, () => {
+    console.log(`Server is running on http://localhost:${port}`);
+    getSpotifyToken().catch(() => console.log("Could not pre-warm Spotify token."));
+});
+

@@ -7,7 +7,8 @@ const fs = require('fs');
 const axios = require('axios');
 const ytdlp = require('yt-dlp-exec');
 require('dotenv').config();
-const axiosRetry = require('axios-retry');
+// --- FIX: Correctly import the axios-retry function ---
+const { default: axiosRetry } = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
@@ -17,7 +18,7 @@ app.use(cors({
   origin: 'https://wavcon.vercel.app'
 }));
 
-// --- FIX: Apply retry logic GLOBALLY to all axios requests ---
+// --- Apply retry logic GLOBALLY to all axios requests ---
 axiosRetry(axios, {
     retries: 3, // Retry up to 3 times
     retryDelay: (retryCount) => {
@@ -274,4 +275,3 @@ app.listen(port, () => {
         console.log("Could not pre-warm Spotify token.");
     });
 });
-

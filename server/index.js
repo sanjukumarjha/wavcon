@@ -27,9 +27,9 @@ axiosRetry(axios, {
 });
 
 const cookiesPath = "./cookies.txt"; 
-const useCookies = fs.existsSync(cookiesPath);
+// --- FIX: Strictly disable cookies on deployment environment ---
+const useCookies = process.env.NODE_ENV === 'development' && fs.existsSync(cookiesPath);
 
-// --- NEW: Dynamic User-Agent helper ---
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
@@ -40,12 +40,10 @@ const USER_AGENTS = [
 ];
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-// --- NEW: Create a temporary directory for downloads ---
 const tempDir = path.join(__dirname, 'tmp');
 if (!fs.existsSync(tempDir)) {
     fs.mkdirSync(tempDir);
 }
-
 
 let spotifyToken = {
     value: null,
@@ -128,6 +126,8 @@ app.post('/api/get-media-data', async (req, res) => {
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
             res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
+            // Use yt-dlp for ALL YouTube metadata fetching
+            console.log(`Fetching YouTube metadata with yt-dlp for: ${url}`);
             const details = await ytdlp(url, {
                 dumpSingleJson: true,
                 noWarnings: true,
@@ -145,7 +145,7 @@ app.post('/api/get-media-data', async (req, res) => {
                         await axios.head(thumbUrl);
                         bestThumbnailUrl = thumbUrl;
                         break;
-                    } catch (e) { /* ignore */ }
+                    } catch (e) { /* Fallback to existing bestThumbnailUrl if head request fails */ }
                 }
             }
             res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: bestThumbnailUrl, platform: 'youtube' });
@@ -176,7 +176,23 @@ app.post('/api/convert', async (req, res) => {
             const artistName = trackDetails.subtitle;
             const searchQuery = `${trackDetails.title} ${artistName}`;
             
-            const yt_videos = await play.search(searchQuery, { limit: 5 });
+            // Use yt-dlp for YouTube search for Spotify matches
+            console.log(`Searching YouTube with yt-dlp for: "${searchQuery}"`);
+            const ytSearchRaw = await ytdlp.exec(searchQuery, {
+                dumpSingleJson: true,
+                defaultSearch: 'ytsearch5:', // Search YouTube and return top 5 results
+                noWarnings: true,
+                noCheckCertificates: true,
+                addHeader: ['User-Agent: ' + getRandomUserAgent()], // Dynamic User-Agent
+            });
+            
+            const yt_videos = ytSearchRaw.entries.map(entry => ({
+                url: entry.webpage_url,
+                title: entry.title,
+                durationInSec: entry.duration,
+                channel: { name: entry.uploader },
+            }));
+
             if (yt_videos.length === 0) throw new Error('Could not find a match on YouTube.');
 
             let bestMatch = yt_videos.reduce((prev, curr) => 
@@ -191,7 +207,7 @@ app.post('/api/convert', async (req, res) => {
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
         
         // --- FIX: Download to a temporary file first to save memory ---
-        tempFilePath = path.join(tempDir, `${Date.now()}_${sanitizedTitle}.webm`); // Use webm as it's common for YouTube audio
+        tempFilePath = path.join(tempDir, `${Date.now()}_${sanitizedTitle}.webm`);
         console.log(`[CONVERT] Downloading audio to temporary file: ${tempFilePath}`);
         
         await ytdlp.exec(videoUrl, {
@@ -264,3 +280,4 @@ app.listen(port, async () => {
     }
     console.log("Server initialized and listening.");
 });
+

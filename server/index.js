@@ -1,21 +1,22 @@
+// index.js
 const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const play = require('play-dl'); // Now used for ALL YouTube operations
+const ytdlp = require('yt-dlp-exec');
 const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
-// const ytdlp = require('yt-dlp-exec'); // No longer directly used for any YouTube operations
-const path = require('path'); // Still needed for temporary directory management
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
+
 const app = express();
 const port = process.env.PORT || 3001;
 
 app.use(cors({
-  origin: 'https://wavcon.vercel.app'
+    origin: 'https://wavcon.vercel.app'
 }));
 
 axiosRetry(axios, {
@@ -26,51 +27,44 @@ axiosRetry(axios, {
     },
 });
 
-// --- NEW: Dynamic User-Agent helper (Moved here for any future global use) ---
+const tempDir = path.join(__dirname, 'tmp');
+if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+// --- Cookies-from-env support (Railway safe secret) ---
+const cookiesPath = path.join(__dirname, 'cookies.txt');
+let useCookies = false;
+if (process.env.YT_COOKIES_BASE64) {
+    try {
+        const cookieContent = Buffer.from(process.env.YT_COOKIES_BASE64, 'base64').toString('utf-8');
+        fs.writeFileSync(cookiesPath, cookieContent, { mode: 0o600 }); // rw-------
+        console.log('Wrote cookies.txt from YT_COOKIES_BASE64 env var.');
+        useCookies = true;
+    } catch (e) {
+        console.error('Failed to write cookies from env var:', e.message);
+    }
+} else {
+    useCookies = process.env.NODE_ENV === 'development' && fs.existsSync(cookiesPath);
+}
+
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/108.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/108.0',
-    'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/108.0',
 ];
 const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
-// --- NEW: Remove tempDir creation, no longer downloading temporary files ---
-// The previous temporary directory logic is removed as we're no longer downloading files
-// fs.mkdirSync(tempDir) is removed.
-
-const cookiesPath = "./cookies.txt"; // This is now completely unused
-const useCookies = false; // Explicitly set to false, as cookies are not used with play-dl.stream()
-
-// --- DEFINITIVE FIX: Function to refresh YouTube credentials for play-dl on server start ---
-const refreshYouTubeTokens = async () => {
-    try {
-        console.log('Attempting to refresh YouTube client data for play-dl...');
-        await play.getFreeClientID();
-        console.log('Successfully refreshed YouTube client data.');
-    } catch (error) {
-        console.error('!!! FAILED to refresh YouTube client data on startup !!!');
-        console.error('YouTube functionality may be limited or fail. This can be due to YouTube blocking the server IP. Error:', error.message);
-    }
-};
-
-
-let spotifyToken = {
-    value: null,
-    expirationTime: 0,
-};
+// ------------------ Spotify Token Helpers ------------------
+let spotifyToken = { value: null, expirationTime: 0 };
 
 const getSpotifyToken = async () => {
-    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
-        return spotifyToken.value;
-    }
+    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) return spotifyToken.value;
+
     console.log('Authenticating with Spotify...');
     const clientId = process.env.SPOTIFY_CLIENT_ID;
     const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
     if (!clientId || !clientSecret) throw new Error('Spotify credentials not configured.');
-    
+
     const authOptions = {
         url: 'https://accounts.spotify.com/api/token',
         method: 'post',
@@ -80,6 +74,7 @@ const getSpotifyToken = async () => {
         },
         data: 'grant_type=client_credentials',
     };
+
     try {
         const response = await axios(authOptions);
         spotifyToken.value = response.data.access_token;
@@ -87,7 +82,7 @@ const getSpotifyToken = async () => {
         console.log('Successfully authenticated with Spotify.');
         return spotifyToken.value;
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!", error.message);
+        console.error("Spotify authentication failed:", error.message);
         throw new Error('Spotify authentication failed.');
     }
 };
@@ -99,14 +94,14 @@ const findAppleMusicArtwork = async (track) => {
             const response = await axios.get(`https://itunes.apple.com/lookup?upc=${upc}&entity=album`);
             if (response.data.resultCount > 0) return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
         }
-    } catch (e) { /* Fallback */ }
+    } catch (e) { }
     try {
         const searchTerm = `${track.album.name} ${track.artists[0].name}`;
         const response = await axios.get(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=1`);
         if (response.data.results.length > 0) {
             return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
         }
-    } catch (e) { /* No artwork found */ }
+    } catch (e) { }
     return null;
 };
 
@@ -115,20 +110,20 @@ const getSpotifyTrackDetails = async (trackId) => {
     const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
     const response = await axios.get(trackUrl, { headers: { 'Authorization': `Bearer ${token}` } });
     const track = response.data;
-    
+
     return {
         title: track.name,
         subtitle: track.artists.map(a => a.name).join(', '),
         thumbnail: track.album.images[0]?.url,
         poster: await findAppleMusicArtwork(track),
         platform: 'spotify',
-        duration_ms: track.duration_ms, 
+        duration_ms: track.duration_ms,
     };
 };
 
+// ------------------ Express & Endpoints ------------------
 app.use(express.json());
 
-// --- DEFINITIVE /api/get-media-data ENDPOINT ---
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -139,11 +134,27 @@ app.post('/api/get-media-data', async (req, res) => {
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
             res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // --- FIX: Use play.video_info for YouTube metadata ---
-            console.log(`Fetching YouTube metadata with play-dl.video_info for: ${url}`);
-            const info = await play.video_info(url);
-            const details = info.video_details;
-            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: details.thumbnails.pop()?.url, platform: 'youtube' });
+            console.log(`Fetching YouTube metadata via yt-dlp for: ${url}`);
+            const details = await ytdlp(url, {
+                dumpSingleJson: true,
+                noWarnings: true,
+                noCheckCertificates: true,
+                noPlaylist: true,
+                cookies: useCookies ? cookiesPath : undefined,
+                addHeader: ['User-Agent: ' + getRandomUserAgent()],
+            });
+
+            let bestThumbnailUrl = details.thumbnail;
+            if (details.id) {
+                const potentialThumbnails = [
+                    `https://i.ytimg.com/vi/${details.id}/maxresdefault.jpg`,
+                    `https://i.ytimg.com/vi/${details.id}/hq720.jpg`
+                ];
+                for (const thumbUrl of potentialThumbnails) {
+                    try { await axios.head(thumbUrl); bestThumbnailUrl = thumbUrl; break; } catch { }
+                }
+            }
+            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: bestThumbnailUrl, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
@@ -153,8 +164,9 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
-// --- DEFINITIVE /api/convert ENDPOINT ---
+// ------------------ /api/convert ------------------
 app.post('/api/convert', async (req, res) => {
+    let tempFilePath = null;
     try {
         const { url, title } = req.body;
         if (!url) return res.status(400).json({ error: 'URL is required.' });
@@ -163,37 +175,60 @@ app.post('/api/convert', async (req, res) => {
         if (url.includes('spotify.com/track/')) {
             const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
             if (!trackIdMatch) throw new Error('Invalid Spotify URL.');
-            
+
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             streamTitle = trackDetails.title;
             const spotifyDurationSec = trackDetails.duration_ms / 1000;
             const artistName = trackDetails.subtitle;
             const searchQuery = `${trackDetails.title} ${artistName}`;
-            
-            const yt_videos = await play.search(searchQuery, { limit: 5 });
+
+            console.log(`Searching YouTube via API for: "${searchQuery}"`);
+            const ytSearchRaw = await ytdlp.exec(searchQuery, {
+                dumpSingleJson: true,
+                defaultSearch: 'ytsearch5:',
+                noWarnings: true,
+                noCheckCertificates: true,
+                addHeader: ['User-Agent: ' + getRandomUserAgent()],
+            });
+
+            const yt_videos = ytSearchRaw.entries.map(entry => ({
+                url: entry.webpage_url,
+                title: entry.title,
+                durationInSec: entry.duration,
+                channel: { name: entry.uploader },
+            }));
+
             if (yt_videos.length === 0) throw new Error('Could not find a match on YouTube.');
 
-            let bestMatch = yt_videos.reduce((prev, curr) => 
+            let bestMatch = yt_videos.reduce((prev, curr) =>
                 (Math.abs(curr.durationInSec - spotifyDurationSec) < Math.abs(prev.durationInSec - spotifyDurationSec) ? curr : prev)
             );
             videoUrl = bestMatch.url;
-        } else { // Direct YouTube URL
+        } else {
             streamTitle = title;
             videoUrl = url;
         }
 
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
-        
+        tempFilePath = path.join(tempDir, `${Date.now()}_${sanitizedTitle}.webm`);
+
+        console.log(`[CONVERT] Downloading audio to temporary file: ${tempFilePath}`);
+        await ytdlp.exec(videoUrl, {
+            format: 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
+            output: tempFilePath,
+            noWarnings: true,
+            noCheckCertificates: true,
+            noPlaylist: true,
+            cookies: useCookies ? cookiesPath : undefined,
+            addHeader: ['User-Agent: ' + getRandomUserAgent()],
+        });
+
+        console.log(`[CONVERT] Download complete. Starting FFMPEG conversion.`);
+
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
-        
-        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using stable play-dl stream.`);
-        
-        // --- FIX: Use play.stream() for ALL conversions ---
-        // This is the most memory-efficient and stable streaming method for Render.
-        const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
-        
-        ffmpeg(stream.stream)
+
+        ffmpeg(tempFilePath)
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
@@ -202,26 +237,40 @@ app.post('/api/convert', async (req, res) => {
                 console.error("[FFMPEG STDERR]:", stderr);
                 if (!res.headersSent) res.status(500).send('Error during conversion');
             })
-            .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
+            .on('end', () => {
+                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
+                if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+            })
             .pipe(res, { end: true });
 
     } catch (err) {
         console.error("--- TOP LEVEL CONVERSION ERROR ---", err.stack);
+        if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
         if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
     }
 });
 
-app.get('/api/download-image', (req, res) => { /* ... unchanged ... */ });
+// ------------------ Image download ------------------
+app.get('/api/download-image', async (req, res) => {
+    const { url, title, type } = req.query;
+    if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
+    try {
+        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const suffix = type === 'poster' ? '_poster' : '_thumbnail';
+        const filename = `${sanitizedTitle}${suffix}.jpg`;
+        const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'image/jpeg');
+        response.data.pipe(res);
+    } catch (err) {
+        console.error("--- IMAGE DOWNLOAD PROXY ERROR ---", err.message);
+        res.status(500).send('Failed to download image.');
+    }
+});
 
-// --- DEFINITIVE Server startup logic ---
+// ------------------ Start server ------------------
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
-    try {
-        await getSpotifyToken();
-    } catch (error) {
-        console.error("Failed to pre-warm Spotify token, will try again on first request.");
-    }
-    // --- FIX: Refresh YouTube tokens for play-dl on startup ---
-    await refreshYouTubeTokens(); 
+    try { await getSpotifyToken(); } catch { console.error("Failed to pre-warm Spotify token, will try on first request."); }
     console.log("Server initialized and listening.");
 });

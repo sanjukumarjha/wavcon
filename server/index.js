@@ -7,15 +7,29 @@ const fs = require('fs');
 const axios = require('axios');
 const ytdlp = require('yt-dlp-exec');
 require('dotenv').config();
-const axiosRetry = require('axios-retry'); // --- NEW: Import axios-retry ---
+const axiosRetry = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-const port = process.env.PORT || 3001; // Use dynamic port for deployment
+const port = process.env.PORT || 3001;
 
 app.use(cors({
   origin: 'https://wavcon.vercel.app'
 }));
+
+// --- FIX: Apply retry logic GLOBALLY to all axios requests ---
+axiosRetry(axios, {
+    retries: 3, // Retry up to 3 times
+    retryDelay: (retryCount) => {
+        console.log(`Request failed, attempt #${retryCount}. Retrying in ${retryCount * 2}s...`);
+        return retryCount * 2000; // 2s, 4s, 6s
+    },
+    retryCondition: (error) => {
+        // Retry on network errors or 5xx server errors
+        return axiosRetry.isNetworkOrIdempotentRequestError(error) || (error.response && error.response.status >= 500);
+    },
+});
+
 
 const cookiesPath = "./cookies.txt"; 
 const useCookies = fs.existsSync(cookiesPath);
@@ -24,20 +38,6 @@ let spotifyToken = {
     value: null,
     expirationTime: 0,
 };
-
-// --- NEW: Configure axios for retries ---
-const spotifyAxios = axios.create();
-axiosRetry(spotifyAxios, {
-    retries: 5, // Try 5 times
-    retryDelay: axiosRetry.exponentialDelay, // Exponential backoff (1s, 2s, 4s, 8s, 16s)
-    retryCondition: (error) => {
-        // Only retry on 429 (Too Many Requests) or network errors
-        return error.response && error.response.status === 429 || axiosRetry.isNetworkError(error);
-    },
-    onRetry: (retryCount, error, requestConfig) => {
-        console.warn(`Spotify API rate limit hit (429). Retrying #${retryCount} for ${requestConfig.url}...`);
-    },
-});
 
 const getSpotifyToken = async () => {
     if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
@@ -59,8 +59,7 @@ const getSpotifyToken = async () => {
         data: 'grant_type=client_credentials',
     };
     try {
-        // --- NEW: Use the configured spotifyAxios instance ---
-        const response = await spotifyAxios(authOptions); 
+        const response = await axios(authOptions); 
         const token = response.data.access_token;
         const expiresIn = response.data.expires_in;
         spotifyToken.value = token;
@@ -79,7 +78,7 @@ const findAppleMusicArtwork = async (track) => {
     if (upc) {
         try {
             const lookupUrl = `https://itunes.apple.com/lookup?upc=${upc}&entity=album`;
-            const response = await spotifyAxios.get(lookupUrl); // --- NEW: Use spotifyAxios for Apple Music too ---
+            const response = await axios.get(lookupUrl);
             if (response.data.resultCount > 0) {
                 const artworkUrl = response.data.results[0].artworkUrl100;
                 if (artworkUrl) return artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
@@ -91,7 +90,7 @@ const findAppleMusicArtwork = async (track) => {
     try {
         const searchTerm = `${albumName} ${artistName}`;
         const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=1`;
-        const response = await spotifyAxios.get(searchUrl); // --- NEW: Use spotifyAxios ---
+        const response = await axios.get(searchUrl);
         if (response.data.results.length > 0) {
             const artworkUrl = response.data.results[0].artworkUrl100;
             return artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
@@ -103,7 +102,7 @@ const findAppleMusicArtwork = async (track) => {
 const getSpotifyTrackDetails = async (trackId) => {
     const token = await getSpotifyToken();
     const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
-    const response = await spotifyAxios.get(trackUrl, { headers: { 'Authorization': 'Bearer ' + token } }); // --- NEW: Use spotifyAxios ---
+    const response = await axios.get(trackUrl, { headers: { 'Authorization': 'Bearer ' + token } });
     const track = response.data;
     const standardThumbnail = track.album.images[0]?.url;
     const highResPosterUrl = await findAppleMusicArtwork(track);
@@ -275,3 +274,4 @@ app.listen(port, () => {
         console.log("Could not pre-warm Spotify token.");
     });
 });
+

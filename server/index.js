@@ -2,10 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const play = require('play-dl');
+// const play = require('play-dl'); // NO LONGER USED FOR YOUTUBE STREAMING/METADATA
 const fs = require('fs');
 const axios = require('axios');
-const ytdlp = require('yt-dlp-exec');
+const ytdlp = require('yt-dlp-exec'); // Used for ALL YouTube interactions
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
@@ -18,25 +18,17 @@ app.use(cors({
 }));
 
 axiosRetry(axios, {
-    retries: 3,
+    retries: 3, // Keep retries for general Axios calls
     retryDelay: axiosRetry.exponentialDelay,
+    retryCondition: (error) => {
+        return axiosRetry.isNetworkOrIdempotentRequestError(error) || (error.response && (error.response.status === 429 || error.response.status >= 500));
+    },
 });
 
 const cookiesPath = "./cookies.txt"; 
 const useCookies = fs.existsSync(cookiesPath);
 
-// --- DEFINITIVE FIX: Function to refresh YouTube credentials for play-dl on server start ---
-const refreshYouTubeTokens = async () => {
-    try {
-        console.log('Attempting to refresh YouTube client data for play-dl...');
-        // This is the server equivalent of getting "fresh cookies" and is critical for deployment.
-        await play.getFreeClientID();
-        console.log('Successfully refreshed YouTube client data.');
-    } catch (error) {
-        console.error('!!! FAILED to refresh YouTube client data on startup !!!');
-        console.error('YouTube functionality may be limited. This can be due to YouTube blocking the server IP.');
-    }
-};
+// --- REMOVED: refreshYouTubeTokens as play-dl YouTube features are replaced by yt-dlp ---
 
 let spotifyToken = {
     value: null,
@@ -47,6 +39,7 @@ const getSpotifyToken = async () => {
     if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
         return spotifyToken.value;
     }
+    console.log('Authenticating with Spotify...');
     const clientId = process.env.SPOTIFY_CLIENT_ID;
     const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
     if (!clientId || !clientSecret) throw new Error('Spotify credentials not configured.');
@@ -67,7 +60,7 @@ const getSpotifyToken = async () => {
         console.log('Successfully authenticated with Spotify.');
         return spotifyToken.value;
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!", error.message);
         throw new Error('Spotify authentication failed.');
     }
 };
@@ -83,7 +76,9 @@ const findAppleMusicArtwork = async (track) => {
     try {
         const searchTerm = `${track.album.name} ${track.artists[0].name}`;
         const response = await axios.get(`https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=1`);
-        if (response.data.results.length > 0) return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
+        if (response.data.results.length > 0) {
+            return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
+        }
     } catch (e) { /* No artwork found */ }
     return null;
 };
@@ -106,6 +101,7 @@ const getSpotifyTrackDetails = async (trackId) => {
 
 app.use(express.json());
 
+// --- DEFINITIVE /api/get-media-data ENDPOINT ---
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -116,9 +112,29 @@ app.post('/api/get-media-data', async (req, res) => {
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
             res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // Using the robust ytdlp to get metadata to avoid 429 errors
-            const details = await ytdlp(url, { dumpSingleJson: true, noPlaylist: true });
-            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: details.thumbnail, platform: 'youtube' });
+            // --- FIX: Use yt-dlp for ALL YouTube metadata fetching ---
+            console.log(`Fetching YouTube metadata with yt-dlp for: ${url}`);
+            const details = await ytdlp(url, {
+                dumpSingleJson: true,
+                noWarnings: true,
+                noCheckCertificates: true,
+                noPlaylist: true,
+                cookies: useCookies ? cookiesPath : undefined,
+                addHeader: ['User-Agent: ' + getRandomUserAgent()], // Add dynamic User-Agent
+            });
+
+            let bestThumbnailUrl = details.thumbnail; 
+            if (details.id) {
+                const potentialThumbnails = [`https://i.ytimg.com/vi/${details.id}/maxresdefault.jpg`, `https://i.ytimg.com/vi/${details.id}/hq720.jpg`];
+                for (const thumbUrl of potentialThumbnails) {
+                    try {
+                        await axios.head(thumbUrl);
+                        bestThumbnailUrl = thumbUrl;
+                        break;
+                    } catch (e) { /* Fallback to existing bestThumbnailUrl if head request fails */ }
+                }
+            }
+            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: bestThumbnailUrl, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
@@ -145,7 +161,23 @@ app.post('/api/convert', async (req, res) => {
             const artistName = trackDetails.subtitle;
             const searchQuery = `${trackDetails.title} ${artistName}`;
             
-            const yt_videos = await play.search(searchQuery, { limit: 5 });
+            // --- FIX: Use yt-dlp for YouTube search for Spotify matches ---
+            console.log(`Searching YouTube with yt-dlp for: "${searchQuery}"`);
+            const ytSearchRaw = await ytdlp.exec(searchQuery, {
+                dumpSingleJson: true,
+                defaultSearch: 'ytsearch5:', // Search YouTube and return top 5 results
+                noWarnings: true,
+                noCheckCertificates: true,
+                addHeader: ['User-Agent: ' + getRandomUserAgent()], // Dynamic User-Agent
+            });
+            
+            const yt_videos = ytSearchRaw.entries.map(entry => ({
+                url: entry.webpage_url,
+                title: entry.title,
+                durationInSec: entry.duration,
+                channel: { name: entry.uploader },
+            }));
+
             if (yt_videos.length === 0) throw new Error('Could not find a match on YouTube.');
 
             let bestMatch = yt_videos.reduce((prev, curr) => 
@@ -162,22 +194,53 @@ app.post('/api/convert', async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
         
-        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using stable play-dl stream.`);
-        
-        // --- FIX: Use the stable play.stream() method for all conversions ---
-        const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
-        
-        ffmpeg(stream.stream)
+        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using robust yt-dlp pipe.`);
+
+        const ytdlpArgs = [
+            videoUrl,
+            '-f', 'bestaudio',
+            '-o', '-',
+            '--no-warnings',
+            '--no-playlist',
+            '--no-check-certificates',
+            '--user-agent', getRandomUserAgent(), // Add dynamic User-Agent
+        ];
+        if (useCookies) {
+            ytdlpArgs.push('--cookies', cookiesPath);
+        }
+
+        const ytdlpProcess = ytdlp.exec(ytdlpArgs, {
+            stdio: ['ignore', 'pipe', 'inherit'], // Pipe stdout, inherit stderr for debugging
+            shell: true
+        });
+
+        ffmpeg(ytdlpProcess.stdout)
+            .inputFormat('webm') // Explicitly tell ffmpeg to expect webm or similar
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
             .on('error', (err, stdout, stderr) => {
                 console.error("--- FFMPEG ERROR ---", err.message);
                 console.error("[FFMPEG STDERR]:", stderr);
+                ytdlpProcess.kill();
                 if (!res.headersSent) res.status(500).send('Error during conversion');
             })
-            .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
+            .on('end', () => {
+                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
+                ytdlpProcess.kill();
+            })
             .pipe(res, { end: true });
+
+        ytdlpProcess.on('error', (err) => {
+            console.error("--- YTDLP PROCESS ERROR ---", err.message);
+            if (!res.headersSent) res.status(500).send('Error during audio extraction from yt-dlp.');
+        });
+        ytdlpProcess.on('close', (code) => {
+            if (code !== 0 && code !== null && !ytdlpProcess.killed) { 
+                console.error(`--- YTDLP PROCESS EXITED ABNORMALLY WITH CODE ${code} ---`);
+                if (!res.headersSent) res.status(500).send('Error during audio extraction from yt-dlp.');
+            }
+        });
 
     } catch (err) {
         console.error("--- TOP LEVEL CONVERSION ERROR ---", err.stack);
@@ -185,7 +248,22 @@ app.post('/api/convert', async (req, res) => {
     }
 });
 
-app.get('/api/download-image', (req, res) => { /* ... unchanged ... */ });
+app.get('/api/download-image', async (req, res) => {
+    const { url, title, type } = req.query;
+    if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
+    try {
+        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const suffix = type === 'poster' ? '_poster' : '_thumbnail';
+        const filename = `${sanitizedTitle}${suffix}.jpg`;
+        const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'image/jpeg');
+        response.data.pipe(res);
+    } catch (err) {
+        console.error("--- IMAGE DOWNLOAD PROXY ERROR ---", err.message);
+        res.status(500).send('Failed to download image.');
+    }
+});
 
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
@@ -194,7 +272,19 @@ app.listen(port, async () => {
     } catch (error) {
         console.error("Failed to pre-warm Spotify token, will try again on first request.");
     }
-    await refreshYouTubeTokens(); // Critical step for YouTube stability on Render
+    // No longer calling refreshYouTubeTokens as yt-dlp handles its own client logic
     console.log("Server initialized and listening.");
 });
+
+
+// Helper for yt-dlp's dynamic user agent
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/108.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/108.0',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/108.0',
+];
+const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 

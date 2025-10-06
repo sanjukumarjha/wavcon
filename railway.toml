@@ -1,0 +1,6 @@
+[build]
+  # Install Python before Node dependencies
+  prebuild = "apt-get update && apt-get install -y python3 python3-pip"
+
+[deploy]
+  start = "npm start"

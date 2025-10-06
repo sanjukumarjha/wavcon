@@ -223,14 +223,14 @@ app.post('/api/convert', async (req, res) => {
     tempFilePath = path.join(tempDir, `${Date.now()}_${sanitizedTitle}.webm`);
 
     console.log(`[CONVERT] Downloading: ${videoUrl}`);
-    await ytdlp.exec(videoUrl, {
-      format: 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
-      output: tempFilePath,
-      noWarnings: true,
-      noCheckCertificates: true,
-      noPlaylist: true,
-      addHeader: ['User-Agent: ' + getRandomUserAgent()],
-    });
+   await ytdlp(videoUrl, {
+  format: "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio",
+  output: outputPath,
+  noWarnings: true,
+  noCheckCertificates: true,
+  addHeader: ["User-Agent: Mozilla/5.0"],
+  cookies: "./cookies/youtube_cookies.txt" // 👈 ADD THIS LINE
+});
 
     res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
     res.setHeader('Content-Type', 'audio/wav');

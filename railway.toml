@@ -1,6 +1,11 @@
 [build]
-# Install Python first, then Node dependencies
+# Install Python before Node dependencies
 prebuild = "apt-get update && apt-get install -y python3 python3-pip"
 
 [deploy]
+# Run your usual start command
 start = "npm start"
+
+[env]
+# Optional: tell npm/yt-dlp-exec which python to use
+PYTHON = "/usr/bin/python3"

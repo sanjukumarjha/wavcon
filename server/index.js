@@ -5,7 +5,6 @@ const ffmpegPath = require('ffmpeg-static');
 const play = require('play-dl');
 const fs = require('fs');
 const axios = require('axios');
-const ytdlp = require('yt-dlp-exec');
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
@@ -17,55 +16,30 @@ app.use(cors({
   origin: 'https://wavcon.vercel.app'
 }));
 
+// Apply a global retry mechanism to all axios requests for stability
 axiosRetry(axios, {
-    retries: 5,
+    retries: 3,
     retryDelay: axiosRetry.exponentialDelay,
     retryCondition: (error) => {
         return axiosRetry.isNetworkOrIdempotentRequestError(error) || (error.response && (error.response.status === 429 || error.response.status >= 500));
     },
-    onRetry: (retryCount, error) => {
-        console.log(`Axios request failed (${error.response?.status || 'network error'}). Retrying attempt #${retryCount}...`);
-    }
 });
 
 const cookiesPath = "./cookies.txt"; 
 const useCookies = fs.existsSync(cookiesPath);
 
-let spotifyToken = {
-    value: null,
-    expirationTime: 0,
-};
-
-const getSpotifyToken = async () => {
-    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
-        return spotifyToken.value;
-    }
-    console.log('Authenticating with Spotify...');
-    const clientId = process.env.SPOTIFY_CLIENT_ID;
-    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-        throw new Error('Spotify credentials not configured in environment variables.');
-    }
-    const authOptions = {
-        url: 'https://accounts.spotify.com/api/token',
-        method: 'post',
-        headers: {
-            'Authorization': 'Basic ' + (Buffer.from(clientId + ':' + clientSecret).toString('base64')),
-            'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        data: 'grant_type=client_credentials',
-    };
+// Use play-dl's built-in Spotify token management for reliability
+const setupPlayDlSpotifyToken = async () => {
     try {
-        const response = await axios(authOptions);
-        const token = response.data.access_token;
-        spotifyToken.value = token;
-        spotifyToken.expirationTime = Date.now() + (response.data.expires_in - 60) * 1000;
-        console.log('Successfully authenticated with Spotify.');
-        return token;
+        await play.setToken({
+            spotify: {
+                client_id: process.env.SPOTIFY_CLIENT_ID,
+                client_secret: process.env.SPOTIFY_CLIENT_SECRET,
+            }
+        });
+        console.log('play-dl successfully configured with Spotify credentials.');
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY AFTER ALL RETRIES !!!");
-        if (error.response) console.error('Spotify Error Response:', error.response.data);
-        throw new Error('Spotify authentication failed.');
+        console.error("!!! FAILED TO CONFIGURE PLAY-DL SPOTIFY TOKEN !!!");
     }
 };
 
@@ -86,11 +60,9 @@ const findAppleMusicArtwork = async (track) => {
 };
 
 const getSpotifyTrackDetails = async (trackId) => {
-    // This function now relies on the robust getSpotifyToken function we defined
-    const token = await getSpotifyToken();
-    const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
-    const response = await axios.get(trackUrl, { headers: { 'Authorization': 'Bearer ' + token } });
-    const track = response.data;
+    const fullTrackUrl = `https://open.spotify.com/track/${trackId}`;
+    const track = await play.spotify(fullTrackUrl); 
+    if (!track) throw new Error(`Could not find Spotify track details for ID: ${trackId}`);
 
     return {
         title: track.name,
@@ -98,7 +70,7 @@ const getSpotifyTrackDetails = async (trackId) => {
         thumbnail: track.album?.images[0]?.url,
         poster: await findAppleMusicArtwork(track),
         platform: 'spotify',
-        duration_ms: track.duration_ms,
+        duration_ms: track.durationInMs,
     };
 };
 
@@ -115,38 +87,14 @@ app.post('/api/get-media-data', async (req, res) => {
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             res.json(trackDetails);
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const details = await ytdlp(url, {
-                dumpSingleJson: true,
-                noWarnings: true,
-                noCheckCertificates: true,
-                noPlaylist: true,
-                cookies: useCookies ? cookiesPath : undefined,
-            });
-
-            const videoId = details.id;
-            let bestThumbnailUrl = details.thumbnail;
-            if (videoId) {
-                const potentialThumbnails = [`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`, `https://i.ytimg.com/vi/${videoId}/hq720.jpg`];
-                for (const thumbUrl of potentialThumbnails) {
-                    try {
-                        await axios.head(thumbUrl);
-                        bestThumbnailUrl = thumbUrl;
-                        break;
-                    } catch (e) { /* ignore */ }
-                }
-            }
-            res.json({ 
-                title: details.title, 
-                subtitle: details.uploader || details.channel,
-                thumbnail: bestThumbnailUrl, 
-                platform: 'youtube' 
-            });
+            const info = await play.video_info(url, { htmldata: useCookies ? await play.getFreeClientID() : undefined });
+            const details = info.video_details;
+            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: details.thumbnails.pop()?.url, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
     } catch (err) {
-        console.error("--- FATAL ERROR in /api/get-media-data ---");
-        console.error(err.stack);
+        console.error("--- FATAL ERROR in /api/get-media-data ---", err.stack); 
         res.status(500).json({ error: 'An internal server error occurred while fetching media data.' });
     }
 });
@@ -176,21 +124,19 @@ app.post('/api/convert', async (req, res) => {
             for (const video of yt_videos) {
                 let score = 0;
                 const durationDiff = Math.abs(spotifyDurationSec - video.durationInSec);
-                if (durationDiff > 10) continue; // Stricter pre-filter
+                if (durationDiff > 10) continue;
 
                 const videoTitle = video.title.toLowerCase();
                 if (video.channel?.name.toLowerCase().includes(artistName.toLowerCase())) score += 20;
                 if (videoTitle.includes("official audio")) score += 15;
-                if (videoTitle.includes("lyrics")) score += 5;
-                if (videoTitle.includes("live") || videoTitle.includes("cover") || videoTitle.includes("remix")) score -= 30;
-                score -= durationDiff; // Penalize based on duration difference
+                score -= durationDiff;
                 
                 if (score > highestScore) {
                     highestScore = score;
                     bestMatch = video;
                 }
             }
-            if (!bestMatch) bestMatch = yt_videos[0]; // Fallback to top result if scoring fails
+            if (!bestMatch) bestMatch = yt_videos[0];
             videoUrl = bestMatch.url;
         } else {
             streamTitle = title;
@@ -201,50 +147,33 @@ app.post('/api/convert', async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
         
-        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using yt-dlp pipe.`);
-
-        const ytdlpProcess = ytdlp.exec(videoUrl, {
-            output: '-',
-            format: 'bestaudio/best',
-            noWarnings: true,
-            noPlaylist: true,
-            cookies: useCookies ? cookiesPath : undefined,
-        });
-
-        ffmpeg(ytdlpProcess.stdout)
-            .inputFormat('webm')
+        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using play-dl stream.`);
+        
+        const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
+        
+        ffmpeg(stream.stream)
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
-            .on('error', (err, stdout, stderr) => {
+            .on('error', (err) => {
                 console.error("--- FFMPEG ERROR ---", err.message);
-                ytdlpProcess.kill();
                 if (!res.headersSent) res.status(500).send('Error during conversion');
             })
-            .on('end', () => {
-                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
-            })
+            .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
             .pipe(res, { end: true });
 
     } catch (err) {
-        console.error("--- TOP LEVEL CONVERSION ERROR ---", err.message);
+        console.error("--- TOP LEVEL CONVERSION ERROR ---", err.message, err.stack);
         if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
     }
 });
 
-app.get('/api/download-image', async (req, res) => {
+app.get('/api/download-image', (req, res) => {
     // This endpoint remains the same
-    // ...
 });
 
-// --- FINAL FIX: Removed the incorrect function call ---
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
-    // Pre-warm the Spotify token on startup to ensure it's ready for the first request.
-    try {
-        await getSpotifyToken(); 
-    } catch (error) {
-        console.error("Failed to pre-warm Spotify token on startup, will try again on first request.");
-    }
+    await setupPlayDlSpotifyToken(); 
     console.log("Server initialized and listening.");
 });

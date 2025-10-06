@@ -13,8 +13,9 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const port = process.env.PORT || 3001;
 
-const cookiesPath = "./cookies.txt"; // Relative path for Render
-const useCookies = fs.existsSync(cookiesPath);
+// Cookies (only for local development)
+const cookiesPath = "./cookies.txt";
+const useCookies = fs.existsSync(cookiesPath) && process.env.LOCAL === 'true';
 
 let spotifyToken = {
     value: null,
@@ -169,12 +170,15 @@ app.post('/api/convert', async (req, res) => {
 
         console.log(`[yt-dlp-exec] Fetching audio stream for: ${videoUrl}`);
 
-        const audioStream = ytdlpExec(videoUrl, {
+        const ytdlpOptions = {
             format: 'bestaudio',
-            output: '-',               // stream to stdout
-            cookiefile: useCookies ? cookiesPath : undefined,
+            output: '-',       // stream to stdout
             quiet: true
-        }, { stdio: ['ignore', 'pipe', 'inherit'] });
+        };
+
+        if (useCookies) ytdlpOptions.cookiefile = cookiesPath;
+
+        const audioStream = ytdlpExec(videoUrl, ytdlpOptions, { stdio: ['ignore', 'pipe', 'inherit'] });
 
         ffmpeg(audioStream.stdout)
             .audioBitrate(128)

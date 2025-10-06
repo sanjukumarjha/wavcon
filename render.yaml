@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: wav-converter-backend
+    env: node
+    plan: free
+    region: oregon # You can change this to a region closer to you if you like
+    rootDir: server
+    buildpacks:
+      - url: https://github.com/heroku/heroku-buildpack-python
+      - url: https://github.com/heroku/heroku-buildpack-nodejs
+    buildCommand: "npm install"
+    startCommand: "npm start"
+

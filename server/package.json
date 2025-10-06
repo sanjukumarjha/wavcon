@@ -1,14 +1,14 @@
 {
   "name": "server",
   "version": "1.0.0",
-  "description": "",
+  "description": "A Node.js server for media processing and streaming",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": ["node", "express", "ffmpeg", "media", "youtube", "spotify"],
+  "author": "Sanju Kumar Jha",
   "license": "ISC",
   "dependencies": {
     "axios": "^1.12.2",
@@ -24,5 +24,8 @@
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": "20.x"
   }
 }

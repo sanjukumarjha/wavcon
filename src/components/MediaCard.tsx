@@ -25,19 +25,15 @@ const MediaCard: React.FC<MediaCardProps> = ({ mediaData, platform, onImageDownl
     ? 'bg-red-600/20 text-red-400' 
     : 'bg-green-500/20 text-green-400';
 
-  // --- THIS IS THE FIX ---
-  // Determine which image to download when the hover icon is clicked.
-  // This function now correctly uses the best URL provided by the backend.
   const handleHoverDownloadClick = () => {
-    // For Spotify, always prioritize the high-res poster if it's available
+    // For Spotify, prioritize the high-res poster if it's available
     if (platform === 'spotify' && mediaData.poster) {
       onImageDownload(mediaData.poster, mediaData.title, 'poster');
       return;
     }
 
-    // For YouTube (and as a fallback for Spotify), the backend has ALREADY
-    // provided the best available thumbnail URL in `mediaData.thumbnail`.
-    // We trust and use this URL directly. This prevents 404 errors while ensuring the best quality.
+    // For YouTube (and as a fallback for Spotify), the backend has already 
+    // provided the best available thumbnail URL. We trust and use it directly.
     onImageDownload(mediaData.thumbnail, mediaData.title, 'thumbnail');
   };
 
@@ -53,7 +49,6 @@ const MediaCard: React.FC<MediaCardProps> = ({ mediaData, platform, onImageDownl
               className={`w-full h-full object-cover shadow-xl transition-all duration-300 group-hover:scale-105 ${imageRoundingClass}`}
             />
             <div
-              // Updated onClick handler
               onClick={handleHoverDownloadClick}
               className={`absolute inset-0 bg-black bg-opacity-50 flex items-start justify-end p-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 cursor-pointer ${imageRoundingClass}`}
             >
@@ -104,4 +99,3 @@ const MediaCard: React.FC<MediaCardProps> = ({ mediaData, platform, onImageDownl
 };
 
 export default MediaCard;
-

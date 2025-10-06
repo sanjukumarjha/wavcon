@@ -8,13 +8,12 @@ import MediaCardSkeleton from './components/MediaCardSkeleton';
 type Platform = 'default' | 'youtube' | 'spotify';
 type AppState = 'input' | 'loading' | 'ready' | 'processing' | 'complete';
 
-// This interface matches the data structure sent from your server
 interface MediaData {
   title: string;
   subtitle: string;
   thumbnail: string;
   platform: Platform;
-  poster?: string | null; // Optional poster URL, can be null if not found
+  poster?: string | null;
 }
 
 function App() {
@@ -38,11 +37,11 @@ function App() {
     setCurrentPlatform(detectPlatform(url));
 
     try {
-      const response = await fetch("https://wav-converter-backend.onrender.com/convert", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ videoUrl: youtubeUrl })
-});
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/get-media-data`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to fetch media data.');
@@ -57,7 +56,6 @@ function App() {
       setAppState('input');
     }
   };
-  
 
   const handleDownload = async () => {
     if (!urlToConvert || !mediaData) return;
@@ -70,12 +68,11 @@ function App() {
     }, 400);
 
     try {
-      const response = await fetch("https://wav-converter-backend.onrender.com/convert", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ videoUrl: youtubeUrl })
-});
-
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/convert`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: urlToConvert, title: mediaData.title }),
+      });
 
       clearInterval(prepInterval);
       if (!response.ok) {
@@ -102,7 +99,7 @@ function App() {
   };
 
   const handleImageDownload = (imageUrl: string, title: string, type: 'thumbnail' | 'poster') => {
-    const serverUrl = 'http://localhost:3001/api/download-image';
+    const serverUrl = `${import.meta.env.VITE_API_URL}/api/download-image`;
     const downloadUrl = `${serverUrl}?url=${encodeURIComponent(imageUrl)}&title=${encodeURIComponent(title)}&type=${type}`;
     window.open(downloadUrl, '_blank');
   };
@@ -158,7 +155,6 @@ function App() {
                     <Play className="inline-block w-5 h-5 mr-2" /> Convert to .wav
                   </button>
                   <div className="flex justify-center gap-4 mt-4">
-                    {/* UPDATED: Button now only appears if a high-res poster URL exists */}
                     {currentPlatform === 'spotify' && mediaData.poster && (
                       <button onClick={() => handleImageDownload(mediaData.poster!, mediaData.title, 'poster')} className="flex items-center px-6 py-3 bg-purple-600 text-white rounded-full hover:bg-purple-700 transition-all">
                         <Download className="w-4 h-4 mr-2" /> Download Poster (3000x3000)
@@ -193,4 +189,3 @@ function App() {
 }
 
 export default App;
-

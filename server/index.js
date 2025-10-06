@@ -2,10 +2,11 @@ const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const play = require('play-dl'); // Now used for ALL YouTube streaming and metadata
+const play = require('play-dl'); // Kept for Spotify search/matching
 const fs = require('fs');
 const axios = require('axios');
-// const ytdlp = require('yt-dlp-exec'); // No longer directly used for YouTube operations
+const ytdlp = require('yt-dlp-exec'); // Used for ALL YouTube metadata and downloading to file
+const path = require('path'); // Needed for path.join and temporary files
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
@@ -26,21 +27,25 @@ axiosRetry(axios, {
 });
 
 const cookiesPath = "./cookies.txt"; 
-const useCookies = fs.existsSync(cookiesPath); // This variable is now effectively unused for YouTube operations
+const useCookies = fs.existsSync(cookiesPath);
 
-// --- FIX: Function to refresh YouTube credentials for play-dl on server start ---
-const refreshYouTubeTokens = async () => {
-    try {
-        console.log('Attempting to refresh YouTube client data for play-dl...');
-        // This function forces play-dl to get a fresh set of internal tokens from YouTube.
-        // This is the server equivalent of getting "fresh cookies" and is critical for deployment.
-        await play.getFreeClientID();
-        console.log('Successfully refreshed YouTube client data.');
-    } catch (error) {
-        console.error('!!! FAILED to refresh YouTube client data on startup !!!');
-        console.error('YouTube functionality may be limited or fail. This can be due to YouTube blocking the server IP. Error:', error.message);
-    }
-};
+// --- NEW: Dynamic User-Agent helper ---
+const USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/108.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/108.0',
+    'Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/108.0',
+];
+const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
+// --- NEW: Create a temporary directory for downloads ---
+const tempDir = path.join(__dirname, 'tmp');
+if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir);
+}
+
 
 let spotifyToken = {
     value: null,
@@ -113,7 +118,6 @@ const getSpotifyTrackDetails = async (trackId) => {
 
 app.use(express.json());
 
-// --- DEFINITIVE /api/get-media-data ENDPOINT ---
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -124,11 +128,27 @@ app.post('/api/get-media-data', async (req, res) => {
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
             res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // --- FIX: Use play.video_info for YouTube metadata ---
-            console.log(`Fetching YouTube metadata with play-dl.video_info for: ${url}`);
-            const info = await play.video_info(url);
-            const details = info.video_details;
-            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: details.thumbnails.pop()?.url, platform: 'youtube' });
+            const details = await ytdlp(url, {
+                dumpSingleJson: true,
+                noWarnings: true,
+                noCheckCertificates: true,
+                noPlaylist: true,
+                cookies: useCookies ? cookiesPath : undefined,
+                addHeader: ['User-Agent: ' + getRandomUserAgent()],
+            });
+
+            let bestThumbnailUrl = details.thumbnail; 
+            if (details.id) {
+                const potentialThumbnails = [`https://i.ytimg.com/vi/${details.id}/maxresdefault.jpg`, `https://i.ytimg.com/vi/${details.id}/hq720.jpg`];
+                for (const thumbUrl of potentialThumbnails) {
+                    try {
+                        await axios.head(thumbUrl);
+                        bestThumbnailUrl = thumbUrl;
+                        break;
+                    } catch (e) { /* ignore */ }
+                }
+            }
+            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: bestThumbnailUrl, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
@@ -140,6 +160,7 @@ app.post('/api/get-media-data', async (req, res) => {
 
 // --- DEFINITIVE /api/convert ENDPOINT ---
 app.post('/api/convert', async (req, res) => {
+    let tempFilePath = null; // Keep track of the temp file
     try {
         const { url, title } = req.body;
         if (!url) return res.status(400).json({ error: 'URL is required.' });
@@ -162,22 +183,34 @@ app.post('/api/convert', async (req, res) => {
                 (Math.abs(curr.durationInSec - spotifyDurationSec) < Math.abs(prev.durationInSec - spotifyDurationSec) ? curr : prev)
             );
             videoUrl = bestMatch.url;
-        } else {
+        } else { // Direct YouTube URL
             streamTitle = title;
-            videoUrl = url; // Use the provided YouTube URL for direct conversion
+            videoUrl = url;
         }
 
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
         
+        // --- FIX: Download to a temporary file first to save memory ---
+        tempFilePath = path.join(tempDir, `${Date.now()}_${sanitizedTitle}.webm`); // Use webm as it's common for YouTube audio
+        console.log(`[CONVERT] Downloading audio to temporary file: ${tempFilePath}`);
+        
+        await ytdlp.exec(videoUrl, {
+            format: 'bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio', // Prioritize webm, then m4a, then any best audio
+            output: tempFilePath,
+            noWarnings: true,
+            noCheckCertificates: true,
+            noPlaylist: true,
+            cookies: useCookies ? cookiesPath : undefined,
+            addHeader: ['User-Agent: ' + getRandomUserAgent()], // Add dynamic User-Agent
+        });
+
+        console.log(`[CONVERT] Download complete. Starting FFMPEG conversion.`);
+
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
         
-        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using stable play-dl stream.`);
-        
-        // --- FIX: Use play.stream() for all conversions ---
-        const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
-        
-        ffmpeg(stream.stream)
+        // --- Use the temporary file as input for ffmpeg ---
+        ffmpeg(tempFilePath) 
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
@@ -186,27 +219,48 @@ app.post('/api/convert', async (req, res) => {
                 console.error("[FFMPEG STDERR]:", stderr);
                 if (!res.headersSent) res.status(500).send('Error during conversion');
             })
-            .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
+            .on('end', () => {
+                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
+                // Clean up the temporary file on success
+                if (fs.existsSync(tempFilePath)) {
+                    fs.unlinkSync(tempFilePath);
+                }
+            })
             .pipe(res, { end: true });
 
     } catch (err) {
         console.error("--- TOP LEVEL CONVERSION ERROR ---", err.stack);
+        // Clean up the temporary file on error
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
+        }
         if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
     }
 });
 
-app.get('/api/download-image', (req, res) => { /* ... unchanged ... */ });
+app.get('/api/download-image', async (req, res) => {
+    const { url, title, type } = req.query;
+    if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
+    try {
+        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const suffix = type === 'poster' ? '_poster' : '_thumbnail';
+        const filename = `${sanitizedTitle}${suffix}.jpg`;
+        const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'image/jpeg');
+        response.data.pipe(res);
+    } catch (err) {
+        console.error("--- IMAGE DOWNLOAD PROXY ERROR ---", err.message);
+        res.status(500).send('Failed to download image.');
+    }
+});
 
-// --- DEFINITIVE Server startup logic ---
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
-    // Pre-warm the Spotify token on startup
     try {
         await getSpotifyToken();
     } catch (error) {
         console.error("Failed to pre-warm Spotify token, will try again on first request.");
     }
-    // --- FIX: Refresh YouTube tokens for play-dl on startup ---
-    await refreshYouTubeTokens(); 
     console.log("Server initialized and listening.");
 });

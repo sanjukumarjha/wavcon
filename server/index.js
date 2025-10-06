@@ -2,11 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const play = require('play-dl');
+const play = require('play-dl'); // Used for all streaming and YouTube search
 const fs = require('fs');
 const axios = require('axios');
-const ytdlp = require('yt-dlp-exec');
-const path = require('path'); // Needed for handling file paths
+const ytdlp = require('yt-dlp-exec'); // Now primarily for robust YouTube metadata (via dumping JSON)
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
@@ -19,18 +18,13 @@ app.use(cors({
 }));
 
 axiosRetry(axios, {
-    retries: 3,
+    retries: 3, // Keep retries for general Axios calls
     retryDelay: axiosRetry.exponentialDelay,
 });
 
-// --- DEFINITIVE FIX: Setup for temporary file downloads ---
-const tempDir = path.join(__dirname, 'tmp');
-if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir);
-}
-
-const cookiesPath = "./cookies.txt";
-const useCookies = fs.existsSync(cookiesPath);
+// We are no longer using cookiesPath with play-dl.stream due to its unreliability on Render
+// const cookiesPath = "./cookies.txt";
+// const useCookies = fs.existsSync(cookiesPath); // This variable is now effectively unused for streaming
 
 let spotifyToken = {
     value: null,
@@ -41,6 +35,7 @@ const getSpotifyToken = async () => {
     if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
         return spotifyToken.value;
     }
+    console.log('Authenticating with Spotify...');
     const clientId = process.env.SPOTIFY_CLIENT_ID;
     const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
     if (!clientId || !clientSecret) throw new Error('Spotify credentials not configured.');
@@ -61,7 +56,7 @@ const getSpotifyToken = async () => {
         console.log('Successfully authenticated with Spotify.');
         return spotifyToken.value;
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!", error.message);
         throw new Error('Spotify authentication failed.');
     }
 };
@@ -100,6 +95,7 @@ const getSpotifyTrackDetails = async (trackId) => {
 
 app.use(express.json());
 
+// --- UPDATED /api/get-media-data ENDPOINT: Using play.video_info for YouTube ---
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -110,8 +106,11 @@ app.post('/api/get-media-data', async (req, res) => {
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
             res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const details = await ytdlp(url, { dumpSingleJson: true, noPlaylist: true });
-            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: details.thumbnail, platform: 'youtube' });
+            // --- FIX: Revert to play.video_info for YouTube metadata ---
+            // This is more stable for metadata in this environment than yt-dlp's direct calls
+            const info = await play.video_info(url);
+            const details = info.video_details;
+            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: details.thumbnails.pop()?.url, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
@@ -121,9 +120,8 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
-// --- DEFINITIVE /api/convert ENDPOINT ---
+// --- DEFINITIVE /api/convert ENDPOINT: Using play.stream for all conversions ---
 app.post('/api/convert', async (req, res) => {
-    let tempFilePath = null; // Keep track of the temp file
     try {
         const { url, title } = req.body;
         if (!url) return res.status(400).json({ error: 'URL is required.' });
@@ -148,27 +146,20 @@ app.post('/api/convert', async (req, res) => {
             videoUrl = bestMatch.url;
         } else {
             streamTitle = title;
-            videoUrl = url;
+            videoUrl = url; // Use the provided YouTube URL for direct conversion
         }
 
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
         
-        // --- FIX: Download to a temporary file first to save memory ---
-        tempFilePath = path.join(tempDir, `${Date.now()}.tmp`);
-        console.log(`[CONVERT] Downloading audio to temporary file: ${tempFilePath}`);
-        
-        await ytdlp.exec(videoUrl, {
-            format: 'bestaudio[ext=m4a]/bestaudio', // m4a is a good intermediate format
-            output: tempFilePath,
-            cookies: useCookies ? cookiesPath : undefined,
-        });
-
-        console.log(`[CONVERT] Download complete. Starting FFMPEG conversion.`);
-
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
         
-        ffmpeg(tempFilePath) // Use the temporary file as input
+        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using stable play-dl stream.`);
+        
+        // --- FIX: Use play.stream() for all conversions ---
+        const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
+        
+        ffmpeg(stream.stream)
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
@@ -177,21 +168,11 @@ app.post('/api/convert', async (req, res) => {
                 console.error("[FFMPEG STDERR]:", stderr);
                 if (!res.headersSent) res.status(500).send('Error during conversion');
             })
-            .on('end', () => {
-                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
-                // Clean up the temporary file on success
-                if (fs.existsSync(tempFilePath)) {
-                    fs.unlinkSync(tempFilePath);
-                }
-            })
+            .on('end', () => console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`))
             .pipe(res, { end: true });
 
     } catch (err) {
         console.error("--- TOP LEVEL CONVERSION ERROR ---", err.stack);
-        // Clean up the temporary file on error
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath);
-        }
         if (!res.headersSent) res.status(500).send('An error occurred during conversion.');
     }
 });
@@ -200,6 +181,7 @@ app.get('/api/download-image', (req, res) => { /* ... unchanged ... */ });
 
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
+    // Pre-warm the Spotify token on startup
     try {
         await getSpotifyToken();
     } catch (error) {

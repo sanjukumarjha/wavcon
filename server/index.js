@@ -3,140 +3,121 @@ import cors from "cors";
 import dotenv from "dotenv";
 import fs from "fs";
 import path from "path";
-import { exec } from "child_process";
-import { fileURLToPath } from "url";
-import * as play from "play-dl";
+import ytdl from "ytdl-core";
+import fetch from "node-fetch";
+import axios from "axios";
 
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 3001;
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-// ✅ Apply CORS globally before any routes
-app.use(
-  cors({
-    origin: ["https://wavcon.vercel.app", "http://localhost:5173"],
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
-  })
-);
-
-// ✅ Handle preflight for all routes
-app.options("*", cors());
-
+app.use(cors());
 app.use(express.json());
 
-// ✅ Keep-alive test
+const PORT = process.env.PORT || 10000;
+
+// ============ SPOTIFY AUTH ============
+let spotifyToken = null;
+let spotifyTokenExpiry = 0;
+
+async function getSpotifyToken() {
+  if (spotifyToken && Date.now() < spotifyTokenExpiry) return spotifyToken;
+
+  try {
+    const response = await axios.post(
+      "https://accounts.spotify.com/api/token",
+      "grant_type=client_credentials",
+      {
+        headers: {
+          Authorization:
+            "Basic " +
+            Buffer.from(
+              process.env.SPOTIFY_CLIENT_ID + ":" + process.env.SPOTIFY_CLIENT_SECRET
+            ).toString("base64"),
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+      }
+    );
+
+    spotifyToken = response.data.access_token;
+    spotifyTokenExpiry = Date.now() + response.data.expires_in * 1000;
+    console.log("✅ Spotify token refreshed");
+    return spotifyToken;
+  } catch (err) {
+    console.error("❌ Error getting Spotify token:", err.message);
+    return null;
+  }
+}
+
+// ============ YOUTUBE TO WAV ============
+app.post("/api/youtube-to-wav", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!ytdl.validateURL(url))
+      return res.status(400).json({ error: "Invalid YouTube URL" });
+
+    const info = await ytdl.getInfo(url);
+    const title = info.videoDetails.title.replace(/[^\w\s]/gi, "_");
+    const filePath = path.join("/tmp", `${title}.wav`);
+
+    const audio = ytdl(url, { quality: "highestaudio" });
+    const ffmpeg = (await import("fluent-ffmpeg")).default;
+    ffmpeg(audio)
+      .audioFrequency(48000)
+      .audioCodec("pcm_s16le")
+      .toFormat("wav")
+      .save(filePath)
+      .on("end", () => {
+        res.download(filePath, `${title}.wav`, (err) => {
+          fs.unlink(filePath, () => {});
+          if (err) console.error("Download error:", err);
+        });
+      })
+      .on("error", (err) => {
+        console.error("FFmpeg error:", err);
+        res.status(500).json({ error: "Conversion failed" });
+      });
+  } catch (err) {
+    console.error("YouTube conversion error:", err);
+    if (err.message.includes("429"))
+      return res
+        .status(429)
+        .json({ error: "YouTube rate limit. Try again in 2–5 minutes." });
+    res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// ============ SPOTIFY SONG DETAILS ============
+app.post("/api/spotify-song", async (req, res) => {
+  try {
+    const { url } = req.body;
+    const token = await getSpotifyToken();
+    if (!token) return res.status(500).json({ error: "Spotify Auth Failed" });
+
+    const match = url.match(/track\/([a-zA-Z0-9]+)/);
+    if (!match) return res.status(400).json({ error: "Invalid Spotify URL" });
+
+    const trackId = match[1];
+    const response = await axios.get(`https://api.spotify.com/v1/tracks/${trackId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    res.json({
+      name: response.data.name,
+      artists: response.data.artists.map((a) => a.name).join(", "),
+      album: response.data.album.name,
+      image: response.data.album.images[0]?.url,
+    });
+  } catch (err) {
+    console.error("Spotify fetch error:", err.message);
+    res.status(500).json({ error: "Spotify request failed" });
+  }
+});
+
+// ============ ROOT ROUTE ============
 app.get("/", (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.send("✅ WavCon backend running fine!");
+  res.send("🎵 YouTube & Spotify WAV Converter Backend Running");
 });
 
-// 🎵 Get media info (metadata only)
-app.post("/api/get-media-data", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "URL is required" });
-
-  try {
-    let info;
-    let platform = "default";
-
-    if (url.includes("youtube.com") || url.includes("youtu.be")) {
-      info = await play.video_info(url);
-      platform = "youtube";
-    } else if (url.includes("spotify.com")) {
-      info = await play.spotify(url);
-      platform = "spotify";
-    } else {
-      return res.status(400).json({ error: "Unsupported platform" });
-    }
-
-    const title = info.video_details?.title || info.name || "Unknown Title";
-    const subtitle =
-      info.video_details?.channel?.name ||
-      info.artists?.map((a) => a.name).join(", ") ||
-      "Unknown Artist";
-    const thumbnail =
-      info.video_details?.thumbnail?.url ||
-      info.thumbnail?.url ||
-      "";
-
-    res.json({ title, subtitle, thumbnail, platform });
-  } catch (err) {
-    console.error("Metadata fetch failed:", err);
-    res.status(500).json({
-      error: "Failed to fetch media data",
-      details: err.message,
-    });
-  }
-});
-
-// 🎧 Convert to WAV and download
-app.post("/api/convert", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-
-  const { url, title } = req.body;
-  if (!url || !title) return res.status(400).send("Missing URL or title");
-
-  const safeTitle = title.replace(/[^a-z0-9_\- ]/gi, "_");
-  const outputPath = path.join(__dirname, `${safeTitle}.wav`);
-
-  try {
-    console.log("Starting yt-dlp conversion:", url);
-
-    const command = `yt-dlp -x --audio-format wav --audio-quality 0 -o "${outputPath}" "${url}"`;
-
-    exec(command, (error, stdout, stderr) => {
-      if (error) {
-        console.error("yt-dlp error:", stderr || error.message);
-        return res.status(500).send("Conversion failed");
-      }
-
-      if (!fs.existsSync(outputPath)) {
-        console.error("Output file missing:", outputPath);
-        return res.status(404).send("File not found after conversion");
-      }
-
-      res.setHeader("Content-Type", "audio/wav");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${safeTitle}.wav"`
-      );
-
-      const stream = fs.createReadStream(outputPath);
-      stream.pipe(res);
-
-      stream.on("end", () => {
-        fs.unlink(outputPath, (err) => {
-          if (err) console.error("Cleanup failed:", err);
-          else console.log("Deleted temp file:", outputPath);
-        });
-      });
-    });
-  } catch (err) {
-    console.error("Conversion failed:", err);
-    res.status(500).send("Conversion failed: " + err.message);
-  }
-});
-
-// 🧹 Auto-clean temp .wav files hourly
-setInterval(() => {
-  fs.readdir(__dirname, (err, files) => {
-    if (err) return;
-    files
-      .filter((f) => f.endsWith(".wav"))
-      .forEach((file) => {
-        fs.unlink(path.join(__dirname, file), (err) => {
-          if (!err) console.log("🧹 Deleted:", file);
-        });
-      });
-  });
-}, 60 * 60 * 1000);
-
-// ✅ Start server
-app.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 Server live at port ${port}`);
+app.listen(PORT, () => {
+  console.log(`🚀 Server is running on http://localhost:${PORT}`);
 });

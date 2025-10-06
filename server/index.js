@@ -21,8 +21,7 @@ app.use(cors({
   credentials: false
 }));
 
-app.options('*', cors()); // Handle preflight requests globally
-
+app.options(/.*/, cors());
 
 // --- Apply retry logic GLOBALLY to all axios requests ---
 axiosRetry(axios, {

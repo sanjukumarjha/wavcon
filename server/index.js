@@ -24,7 +24,7 @@ axiosRetry(axios, {
     (error.response && (error.response.status === 429 || error.response.status >= 500)),
 });
 
-const cookiesPath = './cookies.txt';
+const cookiesPath = './cookies/youtube_cookies.txt';
 const useCookies = process.env.NODE_ENV === 'development' && fs.existsSync(cookiesPath);
 
 const USER_AGENTS = [

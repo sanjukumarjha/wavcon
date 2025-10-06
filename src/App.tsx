@@ -38,11 +38,11 @@ function App() {
     setCurrentPlatform(detectPlatform(url));
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/get-media-data`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url }),
-      });
+      const response = await fetch("https://wav-converter-backend.onrender.com/convert", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ videoUrl: youtubeUrl })
+});
       if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.error || 'Failed to fetch media data.');
@@ -70,11 +70,12 @@ function App() {
     }, 400);
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/convert`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: urlToConvert, title: mediaData.title }),
-      });
+      const response = await fetch("https://wav-converter-backend.onrender.com/convert", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ videoUrl: youtubeUrl })
+});
+
 
       clearInterval(prepInterval);
       if (!response.ok) {

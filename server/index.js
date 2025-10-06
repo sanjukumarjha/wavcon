@@ -16,19 +16,26 @@ app.use(cors({
   origin: 'https://wavcon.vercel.app'
 }));
 
-// Apply a global retry mechanism to all axios requests for stability
 axiosRetry(axios, {
     retries: 3,
     retryDelay: axiosRetry.exponentialDelay,
-    retryCondition: (error) => {
-        return axiosRetry.isNetworkOrIdempotentRequestError(error) || (error.response && (error.response.status === 429 || error.response.status >= 500));
-    },
 });
 
-const cookiesPath = "./cookies.txt"; 
-const useCookies = fs.existsSync(cookiesPath);
+// --- NEW: Function to refresh YouTube credentials on server start ---
+const refreshYouTubeTokens = async () => {
+    try {
+        console.log('Attempting to refresh YouTube client data...');
+        // This function forces play-dl to get a fresh set of internal tokens from YouTube.
+        // This is the server equivalent of getting "fresh cookies".
+        await play.getFreeClientID();
+        console.log('Successfully refreshed YouTube client data.');
+    } catch (error) {
+        console.error('!!! FAILED to refresh YouTube client data on startup !!!');
+        console.error('YouTube functionality may be limited or fail. This can be due to YouTube blocking the server IP.');
+        console.error(`Error details: ${error.message}`);
+    }
+};
 
-// Use play-dl's built-in Spotify token management for reliability
 const setupPlayDlSpotifyToken = async () => {
     try {
         await play.setToken({
@@ -44,6 +51,7 @@ const setupPlayDlSpotifyToken = async () => {
 };
 
 const findAppleMusicArtwork = async (track) => {
+    // ... (This function remains the same)
     try {
         const upc = track.album?.external_ids?.upc;
         if (upc) {
@@ -60,10 +68,10 @@ const findAppleMusicArtwork = async (track) => {
 };
 
 const getSpotifyTrackDetails = async (trackId) => {
+    // ... (This function remains the same)
     const fullTrackUrl = `https://open.spotify.com/track/${trackId}`;
     const track = await play.spotify(fullTrackUrl); 
     if (!track) throw new Error(`Could not find Spotify track details for ID: ${trackId}`);
-
     return {
         title: track.name,
         subtitle: track.artists.map(a => a.name).join(', '),
@@ -87,7 +95,7 @@ app.post('/api/get-media-data', async (req, res) => {
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             res.json(trackDetails);
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const info = await play.video_info(url, { htmldata: useCookies ? await play.getFreeClientID() : undefined });
+            const info = await play.video_info(url);
             const details = info.video_details;
             res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: details.thumbnails.pop()?.url, platform: 'youtube' });
         } else {
@@ -172,8 +180,11 @@ app.get('/api/download-image', (req, res) => {
     // This endpoint remains the same
 });
 
+// --- UPDATED: Server startup logic ---
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
+    // Run both initialization steps
     await setupPlayDlSpotifyToken(); 
+    await refreshYouTubeTokens(); // Add the YouTube token refresh
     console.log("Server initialized and listening.");
 });

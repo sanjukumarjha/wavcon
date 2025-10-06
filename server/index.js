@@ -5,7 +5,6 @@ const ffmpegPath = require('ffmpeg-static');
 const play = require('play-dl');
 const fs = require('fs');
 const axios = require('axios');
-const ytdlpExec = require('yt-dlp-exec'); // Node wrapper, no external binary needed
 require('dotenv').config();
 
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -13,7 +12,7 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const port = process.env.PORT || 3001;
 
-// Cookies (only for local development)
+// Local cookies (only if running locally)
 const cookiesPath = "./cookies.txt";
 const useCookies = fs.existsSync(cookiesPath) && process.env.LOCAL === 'true';
 
@@ -32,18 +31,17 @@ const getSpotifyToken = async () => {
 
     if (!clientId || !clientSecret) throw new Error('Spotify credentials missing.');
 
-    const authOptions = {
-        url: 'https://accounts.spotify.com/api/token',
-        method: 'post',
-        headers: {
-            'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64'),
-            'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        data: 'grant_type=client_credentials'
-    };
-
     try {
-        const response = await axios(authOptions);
+        const response = await axios.post(
+            'https://accounts.spotify.com/api/token',
+            'grant_type=client_credentials',
+            {
+                headers: {
+                    'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64'),
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            }
+        );
         const token = response.data.access_token;
         const expiresIn = response.data.expires_in;
         spotifyToken.value = token;
@@ -56,7 +54,7 @@ const getSpotifyToken = async () => {
     }
 };
 
-// Get high-resolution artwork from Apple Music
+// Get Apple Music high-res artwork
 const findAppleMusicArtwork = async (track) => {
     const upc = track.album.external_ids?.upc;
     if (upc) {
@@ -76,8 +74,7 @@ const findAppleMusicArtwork = async (track) => {
         const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(albumName + ' ' + artistName)}&entity=album&limit=1`;
         const response = await axios.get(searchUrl);
         if (response.data.results.length > 0) {
-            const artworkUrl = response.data.results[0].artworkUrl100;
-            return artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
+            return response.data.results[0].artworkUrl100.replace('100x100bb.jpg', '3000x3000.jpg');
         }
     } catch { }
     return null;
@@ -168,19 +165,12 @@ app.post('/api/convert', async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
 
-        console.log(`[yt-dlp-exec] Fetching audio stream for: ${videoUrl}`);
+        console.log(`[play-dl] Fetching audio stream for: ${videoUrl}`);
 
-        const ytdlpOptions = {
-            format: 'bestaudio',
-            output: '-',       // stream to stdout
-            quiet: true
-        };
+        // Play-dl stream (avoids YouTube 429)
+        const stream = await play.stream(videoUrl, useCookies ? { cookies: cookiesPath } : undefined);
 
-        if (useCookies) ytdlpOptions.cookiefile = cookiesPath;
-
-        const audioStream = ytdlpExec(videoUrl, ytdlpOptions, { stdio: ['ignore', 'pipe', 'inherit'] });
-
-        ffmpeg(audioStream.stdout)
+        ffmpeg(stream.stream)
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)

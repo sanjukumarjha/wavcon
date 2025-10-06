@@ -2,10 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const play = require('play-dl'); // Used for all streaming and YouTube search
+const play = require('play-dl');
 const fs = require('fs');
 const axios = require('axios');
-const ytdlp = require('yt-dlp-exec'); // Now primarily for robust YouTube metadata (via dumping JSON)
+const ytdlp = require('yt-dlp-exec');
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
@@ -18,13 +18,25 @@ app.use(cors({
 }));
 
 axiosRetry(axios, {
-    retries: 3, // Keep retries for general Axios calls
+    retries: 3,
     retryDelay: axiosRetry.exponentialDelay,
 });
 
-// We are no longer using cookiesPath with play-dl.stream due to its unreliability on Render
-// const cookiesPath = "./cookies.txt";
-// const useCookies = fs.existsSync(cookiesPath); // This variable is now effectively unused for streaming
+const cookiesPath = "./cookies.txt"; 
+const useCookies = fs.existsSync(cookiesPath);
+
+// --- DEFINITIVE FIX: Function to refresh YouTube credentials for play-dl on server start ---
+const refreshYouTubeTokens = async () => {
+    try {
+        console.log('Attempting to refresh YouTube client data for play-dl...');
+        // This is the server equivalent of getting "fresh cookies" and is critical for deployment.
+        await play.getFreeClientID();
+        console.log('Successfully refreshed YouTube client data.');
+    } catch (error) {
+        console.error('!!! FAILED to refresh YouTube client data on startup !!!');
+        console.error('YouTube functionality may be limited. This can be due to YouTube blocking the server IP.');
+    }
+};
 
 let spotifyToken = {
     value: null,
@@ -35,7 +47,6 @@ const getSpotifyToken = async () => {
     if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
         return spotifyToken.value;
     }
-    console.log('Authenticating with Spotify...');
     const clientId = process.env.SPOTIFY_CLIENT_ID;
     const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
     if (!clientId || !clientSecret) throw new Error('Spotify credentials not configured.');
@@ -56,7 +67,7 @@ const getSpotifyToken = async () => {
         console.log('Successfully authenticated with Spotify.');
         return spotifyToken.value;
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!", error.message);
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
         throw new Error('Spotify authentication failed.');
     }
 };
@@ -95,7 +106,6 @@ const getSpotifyTrackDetails = async (trackId) => {
 
 app.use(express.json());
 
-// --- UPDATED /api/get-media-data ENDPOINT: Using play.video_info for YouTube ---
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -106,11 +116,9 @@ app.post('/api/get-media-data', async (req, res) => {
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
             res.json(await getSpotifyTrackDetails(trackIdMatch[1]));
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // --- FIX: Revert to play.video_info for YouTube metadata ---
-            // This is more stable for metadata in this environment than yt-dlp's direct calls
-            const info = await play.video_info(url);
-            const details = info.video_details;
-            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: details.thumbnails.pop()?.url, platform: 'youtube' });
+            // Using the robust ytdlp to get metadata to avoid 429 errors
+            const details = await ytdlp(url, { dumpSingleJson: true, noPlaylist: true });
+            res.json({ title: details.title, subtitle: details.uploader || details.channel, thumbnail: details.thumbnail, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
@@ -120,7 +128,7 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
-// --- DEFINITIVE /api/convert ENDPOINT: Using play.stream for all conversions ---
+// --- DEFINITIVE /api/convert ENDPOINT ---
 app.post('/api/convert', async (req, res) => {
     try {
         const { url, title } = req.body;
@@ -146,7 +154,7 @@ app.post('/api/convert', async (req, res) => {
             videoUrl = bestMatch.url;
         } else {
             streamTitle = title;
-            videoUrl = url; // Use the provided YouTube URL for direct conversion
+            videoUrl = url;
         }
 
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
@@ -156,7 +164,7 @@ app.post('/api/convert', async (req, res) => {
         
         console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using stable play-dl stream.`);
         
-        // --- FIX: Use play.stream() for all conversions ---
+        // --- FIX: Use the stable play.stream() method for all conversions ---
         const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
         
         ffmpeg(stream.stream)
@@ -181,11 +189,12 @@ app.get('/api/download-image', (req, res) => { /* ... unchanged ... */ });
 
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
-    // Pre-warm the Spotify token on startup
     try {
         await getSpotifyToken();
     } catch (error) {
         console.error("Failed to pre-warm Spotify token, will try again on first request.");
     }
+    await refreshYouTubeTokens(); // Critical step for YouTube stability on Render
     console.log("Server initialized and listening.");
 });
+

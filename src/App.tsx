@@ -38,7 +38,7 @@ function App() {
     setCurrentPlatform(detectPlatform(url));
 
     try {
-      const response = await fetch('http://localhost:3001/api/get-media-data', {
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/get-media-data`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
@@ -69,7 +69,7 @@ function App() {
     }, 400);
 
     try {
-      const response = await fetch('http://localhost:3001/api/convert', {
+      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/convert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: urlToConvert, title: mediaData.title }),

@@ -10,9 +10,9 @@ require('dotenv').config();
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-const port = 3001;
+const port = process.env.PORT || 3001;
 
-const cookiesPath = "C:\\Users\\rjriv\\Downloads\\Websites Work\\WAV\\server\\cookies.txt";
+const cookiesPath = "./cookies.txt";
 
 const useCookies = fs.existsSync(cookiesPath);
 

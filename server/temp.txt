@@ -12,7 +12,8 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const port = 3001;
 
-const cookiesPath = "C:\\Users\\akhil\\Downloads\\WAV\\server\\cookies.txt";
+const cookiesPath = "C:\\Users\\rjriv\\Downloads\\Websites Work\\WAV\\server\\cookies.txt";
+
 const useCookies = fs.existsSync(cookiesPath);
 
 let spotifyToken = {
@@ -53,56 +54,30 @@ const getSpotifyToken = async () => {
     }
 };
 
-// --- NEW: Heavily improved artwork search function ---
 const findAppleMusicArtwork = async (track) => {
     const upc = track.album.external_ids?.upc;
-    
-    // 1. Try UPC lookup first (most accurate)
     if (upc) {
         try {
-            console.log(`Searching Apple Music by UPC: ${upc}`);
             const lookupUrl = `https://itunes.apple.com/lookup?upc=${upc}&entity=album`;
             const response = await axios.get(lookupUrl);
             if (response.data.resultCount > 0) {
                 const artworkUrl = response.data.results[0].artworkUrl100;
-                if (artworkUrl) {
-                    const highResUrl = artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
-                    console.log(`Found high-res artwork via UPC: ${highResUrl}`);
-                    return highResUrl;
-                }
+                if (artworkUrl) return artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
             }
-        } catch (error) {
-            console.log('UPC lookup failed, falling back to text search.');
-        }
+        } catch (error) { /* Fallback */ }
     }
-
-    // 2. Fallback to text search if UPC fails or doesn't exist
     const albumName = track.album.name;
     const artistName = track.artists[0].name;
     try {
         const searchTerm = `${albumName} ${artistName}`;
-        console.log(`Searching Apple Music by text: "${searchTerm}"`);
-        const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=5`;
+        const searchUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(searchTerm)}&entity=album&limit=1`;
         const response = await axios.get(searchUrl);
-        const results = response.data.results;
-        if (results.length === 0) {
-            console.log('No matching album found on Apple Music via text search.');
-            return null;
+        if (response.data.results.length > 0) {
+            const artworkUrl = response.data.results[0].artworkUrl100;
+            return artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
         }
-        const bestMatch = results.find(r => 
-            r.collectionName.toLowerCase() === albumName.toLowerCase() &&
-            r.artistName.toLowerCase() === artistName.toLowerCase()
-        );
-        const result = bestMatch || results[0];
-        const artworkUrl = result.artworkUrl100;
-        if (!artworkUrl) return null;
-        const highResUrl = artworkUrl.replace('100x100bb.jpg', '3000x3000.jpg');
-        console.log(`Found high-res artwork via text search: ${highResUrl}`);
-        return highResUrl;
-    } catch (error) {
-        console.error('Text search for Apple Music artwork failed:', error.message);
-        return null;
-    }
+    } catch (error) { /* Fallback */ }
+    return null;
 };
 
 const getSpotifyTrackDetails = async (trackId) => {
@@ -111,15 +86,15 @@ const getSpotifyTrackDetails = async (trackId) => {
     const response = await axios.get(trackUrl, { headers: { 'Authorization': 'Bearer ' + token } });
     const track = response.data;
     const standardThumbnail = track.album.images[0]?.url;
-
     const highResPosterUrl = await findAppleMusicArtwork(track);
 
     return {
         title: track.name,
-        subtitle: track.artists[0]?.name || 'Unknown Artist',
-        thumbnail: standardThumbnail, // 640x640 for display
-        poster: highResPosterUrl, // This will be null if not found
+        subtitle: track.artists.map(a => a.name).join(', '), // Handle multiple artists
+        thumbnail: standardThumbnail,
+        poster: highResPosterUrl,
         platform: 'spotify',
+        duration_ms: track.duration_ms, 
     };
 };
 
@@ -127,16 +102,14 @@ app.use(cors());
 app.use(express.json());
 
 app.post('/api/get-media-data', async (req, res) => {
+    // This endpoint remains the same and does not need the duration
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required.' });
-
     try {
         if (url.includes('spotify.com/track/')) {
             const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
             if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify track URL.' });
-            const trackId = trackIdMatch[1];
-            const trackDetails = await getSpotifyTrackDetails(trackId);
-            console.log(`Fetched Spotify metadata for: ${trackDetails.title}`);
+            const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             res.json(trackDetails);
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
             const info = await play.video_info(url);
@@ -144,10 +117,7 @@ app.post('/api/get-media-data', async (req, res) => {
             const videoId = details.id;
             let bestThumbnailUrl = details.thumbnails[details.thumbnails.length - 1]?.url;
             if (videoId) {
-                const potentialThumbnails = [
-                    `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
-                    `https://i.ytimg.com/vi/${videoId}/hq720.jpg`,
-                ];
+                const potentialThumbnails = [`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`, `https://i.ytimg.com/vi/${videoId}/hq720.jpg`];
                 for (const thumbUrl of potentialThumbnails) {
                     try {
                         await axios.head(thumbUrl);
@@ -156,12 +126,7 @@ app.post('/api/get-media-data', async (req, res) => {
                     } catch (e) { /* ignore */ }
                 }
             }
-            res.json({
-                title: details.title || 'Untitled',
-                subtitle: details.channel?.name || 'Unknown',
-                thumbnail: bestThumbnailUrl,
-                platform: 'youtube',
-            });
+            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: bestThumbnailUrl, platform: 'youtube' });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
@@ -171,6 +136,7 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
+// --- UPDATED CONVERT ENDPOINT ---
 app.post('/api/convert', async (req, res) => {
     const { url, title } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required.' });
@@ -180,14 +146,67 @@ app.post('/api/convert', async (req, res) => {
         if (url.includes('spotify.com/track/')) {
             const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
             if (!trackIdMatch) throw new Error('Invalid Spotify URL for conversion.');
+            
+            // --- NEW: Advanced song matching logic with scoring ---
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             streamTitle = trackDetails.title;
-            const searchQuery = `${trackDetails.title} ${trackDetails.subtitle} audio`;
-            console.log(`Searching YouTube for: "${searchQuery}"`);
-            const yt_videos = await play.search(searchQuery, { limit: 1 });
+            const spotifyDurationSec = trackDetails.duration_ms / 1000;
+            const artistName = trackDetails.subtitle;
+            const primarySearchQuery = `${trackDetails.title} ${artistName}`;
+            const officialAudioQuery = `${primarySearchQuery} official audio`;
+
+            console.log(`Searching YouTube for: "${officialAudioQuery}" (Original duration: ${spotifyDurationSec.toFixed(2)}s)`);
+            let yt_videos = await play.search(officialAudioQuery, { limit: 3 });
+
+            if (yt_videos.length === 0) {
+                console.log(`"Official audio" search failed. Falling back to general search: "${primarySearchQuery}"`);
+                yt_videos = await play.search(primarySearchQuery, { limit: 5 });
+            }
+            
             if (yt_videos.length === 0) throw new Error('Could not find a matching video on YouTube.');
-            videoUrl = yt_videos[0].url;
-        } else {
+
+            let bestMatch = null;
+            let highestScore = -Infinity;
+
+            console.log('--- Scoring YouTube Results ---');
+
+            for (const video of yt_videos) {
+                let score = 0;
+                const videoTitle = video.title.toLowerCase();
+                const artistNameLower = artistName.toLowerCase();
+
+                // 1. Duration Scoring (Higher score for smaller difference)
+                const durationDiff = Math.abs(spotifyDurationSec - video.durationInSec);
+                if (durationDiff < 10) { // Only score if within a reasonable 10-second range
+                    score += (10 - durationDiff);
+                }
+
+                // 2. Title Keyword Scoring
+                if (videoTitle.includes("official audio")) score += 15;
+                if (videoTitle.includes("lyrics") || videoTitle.includes("lyric video")) score += 10;
+                if (videoTitle.includes(artistNameLower)) score += 5; // Bonus if artist name is in title
+                
+                // 3. Penalty for unwanted keywords
+                if (videoTitle.includes("live") || videoTitle.includes("cover") || videoTitle.includes("remix") || videoTitle.includes("reaction")) {
+                    score -= 20;
+                }
+                
+                console.log(`  - Video: "${video.title}" (Duration: ${video.durationInSec}s, Diff: ${durationDiff.toFixed(2)}s, Score: ${score.toFixed(2)})`);
+
+                if (score > highestScore) {
+                    highestScore = score;
+                    bestMatch = video;
+                }
+            }
+            
+            if (!bestMatch) {
+                bestMatch = yt_videos[0]; // Safe fallback, should not be needed
+            }
+            
+            console.log(`--- Best match selected (Score: ${highestScore.toFixed(2)}): "${bestMatch.title}" ---`);
+            videoUrl = bestMatch.url;
+
+        } else { // YouTube URL
             streamTitle = title;
             videoUrl = url;
         }
@@ -218,6 +237,7 @@ app.post('/api/convert', async (req, res) => {
 });
 
 app.get('/api/download-image', async (req, res) => {
+    // This endpoint remains the same
     const { url, title, type } = req.query;
     if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
     try {

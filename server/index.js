@@ -5,6 +5,7 @@ const ffmpegPath = require('ffmpeg-static');
 const play = require('play-dl');
 const fs = require('fs');
 const axios = require('axios');
+const ytdlp = require('yt-dlp-exec'); // We will now use this for YouTube metadata too
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
@@ -24,14 +25,13 @@ axiosRetry(axios, {
         return axiosRetry.isNetworkOrIdempotentRequestError(error) || (error.response && (error.response.status === 429 || error.response.status >= 500));
     },
     onRetry: (retryCount, error) => {
-        console.log(`Request failed (${error.response?.status || 'network error'}). Retrying attempt #${retryCount}...`);
+        console.log(`Axios request failed (${error.response?.status || 'network error'}). Retrying attempt #${retryCount}...`);
     }
 });
 
 const cookiesPath = "./cookies.txt"; 
 const useCookies = fs.existsSync(cookiesPath);
 
-// --- RE-IMPLEMENTED: Robust, self-managed Spotify Token Logic ---
 let spotifyToken = {
     value: null,
     expirationTime: 0,
@@ -86,25 +86,32 @@ const findAppleMusicArtwork = async (track) => {
     return null;
 };
 
-// --- UPDATED: getSpotifyTrackDetails uses our own token logic ---
 const getSpotifyTrackDetails = async (trackId) => {
-    const token = await getSpotifyToken(); // Use our reliable token function
-    const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
-    const response = await axios.get(trackUrl, { headers: { 'Authorization': 'Bearer ' + token } });
-    const track = response.data;
-    
-    return {
-        title: track.name,
-        subtitle: track.artists.map(a => a.name).join(', '),
-        thumbnail: track.album.images[0]?.url,
-        poster: await findAppleMusicArtwork(track),
-        platform: 'spotify',
-        duration_ms: track.duration_ms,
-    };
+    try {
+        const fullTrackUrl = `https://open.spotify.com/track/${trackId}`;
+        const track = await play.spotify(fullTrackUrl); 
+        
+        if (!track) {
+            throw new Error(`Could not find Spotify track details for ID: ${trackId}`);
+        }
+
+        return {
+            title: track.name,
+            subtitle: track.artists.map(a => a.name).join(', '),
+            thumbnail: track.album?.images[0]?.url,
+            poster: await findAppleMusicArtwork(track),
+            platform: 'spotify',
+            duration_ms: track.durationInMs,
+        };
+    } catch (error) {
+        console.error(`Error in getSpotifyTrackDetails for ${trackId}:`, error.message);
+        throw error;
+    }
 };
 
 app.use(express.json());
 
+// --- UPDATED /api/get-media-data ENDPOINT: Use yt-dlp for YouTube metadata ---
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -116,16 +123,42 @@ app.post('/api/get-media-data', async (req, res) => {
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             res.json(trackDetails);
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            const info = await play.video_info(url);
-            const details = info.video_details;
-            let bestThumbnailUrl = details.thumbnails.pop()?.url;
-            res.json({ title: details.title, subtitle: details.channel?.name, thumbnail: bestThumbnailUrl, platform: 'youtube' });
+            // --- FIX: Use the more robust ytdlp for fetching YouTube metadata ---
+            console.log(`Fetching YouTube metadata with ytdlp for: ${url}`);
+            const details = await ytdlp(url, {
+                dumpSingleJson: true,
+                noWarnings: true,
+                noCheckCertificates: true,
+                noPlaylist: true,
+                cookies: useCookies ? cookiesPath : undefined,
+            });
+
+            const videoId = details.id;
+            let bestThumbnailUrl = details.thumbnail; // yt-dlp provides a good default thumbnail
+
+            // Still try to find max resolution versions (maxresdefault, hq720) if available
+            if (videoId) {
+                const potentialThumbnails = [`https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`, `https://i.ytimg.com/vi/${videoId}/hq720.jpg`];
+                for (const thumbUrl of potentialThumbnails) {
+                    try {
+                        await axios.head(thumbUrl); // Check if the URL exists
+                        bestThumbnailUrl = thumbUrl;
+                        break;
+                    } catch (e) { /* Fallback to existing bestThumbnailUrl if head request fails */ }
+                }
+            }
+            res.json({ 
+                title: details.title, 
+                subtitle: details.uploader || details.channel, // yt-dlp uses 'uploader' or 'channel'
+                thumbnail: bestThumbnailUrl, 
+                platform: 'youtube' 
+            });
         } else {
             res.status(400).json({ error: 'Invalid or unsupported URL.' });
         }
     } catch (err) {
         console.error("--- FATAL ERROR in /api/get-media-data ---");
-        console.error(err.stack); 
+        console.error(err.stack); // Log the full stack trace for better debugging
         res.status(500).json({ error: 'An internal server error occurred while fetching media data.' });
     }
 });
@@ -183,23 +216,61 @@ app.post('/api/convert', async (req, res) => {
             videoUrl = bestMatch.url;
         } else {
             streamTitle = title;
-            videoUrl = url;
+            videoUrl = url; // Use the provided YouTube URL for direct conversion
         }
 
         const sanitizedTitle = (streamTitle || 'audio').replace(/[^a-z0-9_-\s]/gi, '_').trim();
         res.setHeader('Content-Disposition', `attachment; filename="${sanitizedTitle}.wav"`);
         res.setHeader('Content-Type', 'audio/wav');
         
-        const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
-        
-        ffmpeg(stream.stream)
+        console.log(`[CONVERT] Starting conversion for: ${sanitizedTitle} using yt-dlp pipe.`);
+
+        // Use yt-dlp-exec as a child process and pipe its stdout to ffmpeg
+        const ytdlpArgs = [
+            videoUrl,
+            '-f', 'bestaudio', // Request the best audio format
+            '-o', '-',         // Output to stdout (pipe)
+            '--no-warnings',
+            '--no-playlist',
+            '--no-check-certificates',
+        ];
+        if (useCookies) {
+            ytdlpArgs.push('--cookies', cookiesPath);
+        }
+
+        const ytdlpProcess = ytdlp.exec(ytdlpArgs, {
+            stdio: ['ignore', 'pipe', 'inherit'], // Pipe stdout, inherit stderr for debugging
+            shell: true // Important for Windows; also good for Render to ensure yt-dlp is found
+        });
+
+        ffmpeg(ytdlpProcess.stdout)
+            .inputFormat('webm') // Explicitly tell ffmpeg to expect webm or similar (YouTube's best audio is often webm)
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
-            .on('error', (err) => {
+            .on('start', (cmd) => console.log(`[FFMPEG] Started with command: ${cmd}`))
+            .on('error', (err, stdout, stderr) => {
+                console.error("--- FFMPEG ERROR ---", err.message);
+                console.error("[FFMPEG STDERR]:", stderr);
+                ytdlpProcess.kill();
                 if (!res.headersSent) res.status(500).send('Error during conversion');
             })
+            .on('end', () => {
+                console.log(`[FFMPEG] Finished conversion for: ${sanitizedTitle}`);
+                ytdlpProcess.kill();
+            })
             .pipe(res, { end: true });
+
+        ytdlpProcess.on('error', (err) => {
+            console.error("--- YTDLP PROCESS ERROR ---", err.message);
+            if (!res.headersSent) res.status(500).send('Error during audio extraction from yt-dlp.');
+        });
+        ytdlpProcess.on('close', (code) => {
+            if (code !== 0 && code !== null && !ytdlpProcess.killed) { 
+                console.error(`--- YTDLP PROCESS EXITED ABNORMALLY WITH CODE ${code} ---`);
+                if (!res.headersSent) res.status(500).send('Error during audio extraction from yt-dlp.');
+            }
+        });
 
     } catch (err) {
         console.error("--- TOP LEVEL CONVERSION ERROR ---", err.message);
@@ -208,12 +279,25 @@ app.post('/api/convert', async (req, res) => {
 });
 
 app.get('/api/download-image', async (req, res) => {
-    // This endpoint remains the same
+    const { url, title, type } = req.query;
+    if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
+    try {
+        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const suffix = type === 'poster' ? '_poster' : '_thumbnail';
+        const filename = `${sanitizedTitle}${suffix}.jpg`;
+        const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'image/jpeg');
+        response.data.pipe(res);
+    } catch (err) {
+        console.error("--- IMAGE DOWNLOAD PROXY ERROR ---", err.message);
+        res.status(500).send('Failed to download image.');
+    }
 });
 
 app.listen(port, async () => {
     console.log(`Server is running on http://localhost:${port}`);
-    // Pre-warm the token on startup using our reliable function
-    await getSpotifyToken(); 
+    await setupPlayDlSpotifyToken(); 
     console.log("Server initialized and listening.");
 });
+

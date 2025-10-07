@@ -19,7 +19,6 @@ RUN npm install -g npm@11.6.1
 
 RUN npm ci --legacy-peer-deps
 
-# Copy the rest of the app
 COPY . .
 
 

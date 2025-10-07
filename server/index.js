@@ -10,24 +10,18 @@ const { default: axiosRetry } = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-const port = process.env.PORT || 8080;  // fallback for local dev
-const host = '0.0.0.0';
 
-app.listen(port, host, () => {
-  console.log(`Server running on ${host}:${port}`);
+app.use(cors());
+app.use(express.json());
+const PORT = process.env.PORT || 3001; // Railway will automatically provide the port
+const HOST = '0.0.0.0';
+
+app.get('/', (req, res) => {
+  res.send('Server is running!');
 });
 
-const server = app.listen(port, host, () => {
-  console.log(`Server running on ${host}:${port}`);
-});
-
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${port} is already in use. Trying another port...`);
-    // optionally try a different port or exit
-  } else {
-    console.error(err);
-  }
+app.listen(PORT, HOST, () => {
+  console.log(`Server running on ${HOST}:${PORT}`);
 });
 
 

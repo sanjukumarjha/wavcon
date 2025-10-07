@@ -26,7 +26,6 @@ COPY . .
 # Use Tini as the entrypoint to properly handle signals and reap zombie processes
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Start the app with a memory limit for the V8 engine to prevent crashes
-# This is a common requirement for platforms with limited RAM like Railway
-CMD ["node", "--max-old-space-size=460", "index.js"]
+# Start the app using npm's process management for better stability
+CMD ["npm", "start"]
 

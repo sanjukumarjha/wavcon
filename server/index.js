@@ -15,12 +15,23 @@ const host = process.env.HOST || '0.0.0.0';
 
 // --- CONSOLIDATED AND CORRECTED CORS CONFIGURATION ---
 
-// List of allowed domains
 const allowedOrigins = [
-  'https://wavcon.vercel.app', // Your production frontend
-  /https:\/\/wavcon-.*\.vercel\.app$/ // Regular expression for all Vercel preview URLs
-  // You could also add 'http://localhost:5173' for local testing if needed
+  'https://wavcon.vercel.app',
+  'https://wavcon-p7nq9h39w-rjriva00-gmailcoms-projects.vercel.app' // add any preview deploys
 ];
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.header("Access-Control-Allow-Credentials", "true");
+  }
+  // Allow preflight requests
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
 const corsOptions = {
   origin: function (origin, callback) {

@@ -11,12 +11,32 @@ const { default: axiosRetry } = require('axios-retry');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-const port = process.env.PORT || 3001;
+// --- RAILWAY SPECIFIC CHANGES ---
+const port = process.env.PORT || 3001; // Railway provides the PORT variable
+const host = '0.0.0.0';                // Listen on all network interfaces
 
-// CORS configuration to allow requests from your deployed frontend
-app.use(cors({
-  origin: 'https://wavcon.vercel.app'
-}));
+// --- RAILWAY SPECIFIC CORS CONFIGURATION ---
+const allowedOrigins = [
+  'https://wavcon.vercel.app',
+  // You can add preview deployment URLs here if needed
+  'https://wavcon-p7nq9h39w-rjriva00-gmailcoms-projects.vercel.app'
+];
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Origin not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
+
+app.use(cors(corsOptions));
+app.use(express.json());
 
 // Apply a global retry mechanism to all axios requests for stability
 axiosRetry(axios, {
@@ -27,11 +47,10 @@ axiosRetry(axios, {
     },
 });
 
-// Use a relative path for cookies, compatible with Render's file system
-const cookiesPath = "./cookies.txt"; 
+const cookiesPath = "./cookies.txt";
 const useCookies = fs.existsSync(cookiesPath);
 
-// Self-managed Spotify Token with retries for stability on Render
+// Self-managed Spotify Token with retries
 let spotifyToken = {
     value: null,
     expirationTime: 0,
@@ -64,7 +83,7 @@ const getSpotifyToken = async () => {
         console.log('Successfully authenticated with Spotify.');
         return token;
     } catch (error) {
-        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY AFTER ALL RETRIES !!!");
+        console.error("!!! FAILED TO AUTHENTICATE WITH SPOTIFY !!!");
         if (error.response) console.error('Spotify Error Response:', error.response.data);
         throw new Error('Spotify authentication failed.');
     }
@@ -86,7 +105,6 @@ const findAppleMusicArtwork = async (track) => {
     return null;
 };
 
-// Uses our own robust getSpotifyToken function
 const getSpotifyTrackDetails = async (trackId) => {
     const token = await getSpotifyToken();
     const trackUrl = `https://api.spotify.com/v1/tracks/${trackId}`;
@@ -103,9 +121,15 @@ const getSpotifyTrackDetails = async (trackId) => {
     };
 };
 
-app.use(express.json());
+// --- RAILWAY SPECIFIC: Health Check Route ---
+// This prevents the 502 errors by giving Railway a URL to check.
+app.get('/', (req, res) => {
+    res.status(200).send('Server is healthy and running!');
+});
 
-// --- DEFINITIVE /api/get-media-data ENDPOINT ---
+
+// --- API ROUTES ---
+
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -117,7 +141,6 @@ app.post('/api/get-media-data', async (req, res) => {
             const trackDetails = await getSpotifyTrackDetails(trackIdMatch[1]);
             res.json(trackDetails);
         } else if (url.includes('youtube.com') || url.includes('youtu.be')) {
-            // Use the more robust ytdlp for fetching YouTube metadata
             console.log(`Fetching YouTube metadata with ytdlp for: ${url}`);
             const details = await ytdlp(url, {
                 dumpSingleJson: true,
@@ -148,7 +171,6 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
-// --- DEFINITIVE /api/convert ENDPOINT ---
 app.post('/api/convert', async (req, res) => {
     try {
         const { url, title } = req.body;
@@ -202,7 +224,7 @@ app.post('/api/convert', async (req, res) => {
 
         const ytdlpArgs = [
             videoUrl,
-            '-f', 'bestaudio[ext=webm]/bestaudio/best', // More flexible format selector
+            '-f', 'bestaudio[ext=webm]/bestaudio/best',
             '-o', '-',
             '--no-warnings',
             '--no-playlist',
@@ -216,7 +238,7 @@ app.post('/api/convert', async (req, res) => {
         const ytdlpProcess = ytdlp.exec(ytdlpArgs);
 
         ffmpeg(ytdlpProcess.stdout)
-            .inputOptions('-f', 'webm') // Hint to ffmpeg about the input format
+            .inputOptions('-f', 'webm')
             .audioBitrate(128)
             .toFormat('wav')
             .audioFrequency(48000)
@@ -249,11 +271,26 @@ app.post('/api/convert', async (req, res) => {
 });
 
 app.get('/api/download-image', async (req, res) => {
-    // This endpoint is correct and remains the same
+    const { url, title, type } = req.query;
+    if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
+    try {
+        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const filename = `${sanitizedTitle}_${type}.jpg`;
+        const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'image/jpeg');
+        response.data.pipe(res);
+    } catch (err) {
+        console.error('Image download error:', err.message);
+        res.status(500).send('Failed to download image.');
+    }
 });
 
-app.listen(port, async () => {
-    console.log(`Server is running on http://localhost:${port}`);
+
+// --- RAILWAY SPECIFIC: Server Startup ---
+// Listen on the correct host and port for Railway's network.
+app.listen(port, host, async () => {
+    console.log(`Server is running on ${host}:${port}`);
     try {
         await getSpotifyToken();
     } catch (error) {

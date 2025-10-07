@@ -9,10 +9,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Ensure 'python' command exists
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
-# Set working directory
 WORKDIR /app
 
 # Copy package files first to leverage Docker cache

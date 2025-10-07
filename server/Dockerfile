@@ -1,8 +1,9 @@
 # Use official Node.js slim image
 FROM node:20-slim
 
-# Install Python and other system dependencies required for yt-dlp
+# Install Tini for better signal handling, plus other system dependencies
 RUN apt-get update && apt-get install -y \
+    tini \
     python3 \
     python3-pip \
     build-essential \
@@ -22,8 +23,10 @@ RUN npm ci --legacy-peer-deps
 # Copy the rest of the app source code
 COPY . .
 
-# NOTE: The EXPOSE line has been removed. 
-# Railway will automatically detect the port from the PORT environment variable your app uses.
+# Use Tini as the entrypoint to properly handle signals and reap zombie processes
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
-# Start the app
-CMD ["node", "index.js"]
+# Start the app with a memory limit for the V8 engine to prevent crashes
+# This is a common requirement for platforms with limited RAM like Railway
+CMD ["node", "--max-old-space-size=460", "index.js"]
+

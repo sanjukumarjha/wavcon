@@ -37,7 +37,7 @@ function App() {
     setCurrentPlatform(detectPlatform(url));
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/get-media-data`, {
+      const response = await fetch(`${import.meta.env.VITE_API_URL}api/get-media-data`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url }),
@@ -68,7 +68,7 @@ function App() {
     }, 400);
 
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_URL}/api/convert`, {
+      const response = await fetch(`${import.meta.env.VITE_API_URL}api/convert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: urlToConvert, title: mediaData.title }),
@@ -99,7 +99,7 @@ function App() {
   };
 
   const handleImageDownload = (imageUrl: string, title: string, type: 'thumbnail' | 'poster') => {
-    const serverUrl = `${import.meta.env.VITE_API_URL}/api/download-image`;
+    const serverUrl = `${import.meta.env.VITE_API_URL}api/download-image`;
     const downloadUrl = `${serverUrl}?url=${encodeURIComponent(imageUrl)}&title=${encodeURIComponent(title)}&type=${type}`;
     window.open(downloadUrl, '_blank');
   };

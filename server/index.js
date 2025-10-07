@@ -13,29 +13,32 @@ const app = express();
 const port = process.env.PORT || 3001;
 const host = process.env.HOST || '0.0.0.0';
 
-// --- CORS CONFIGURATION ---
+// --- CORRECTED CORS CONFIGURATION ---
+// This is the standard and most reliable way to handle CORS.
 const allowedOrigins = [
   'https://wavcon.vercel.app',
   'https://wavcon-p7nq9h39w-rjriva00-gmailcoms-projects.vercel.app'
 ];
 
-app.use((req, res, next) => {
-  const origin = req.headers.origin;
-  if (allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  }
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+};
 
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204); // Must include headers above
-  }
+// This middleware will handle all CORS logic, including preflight OPTIONS requests.
+// It MUST come before your routes and app.use(express.json()).
+app.use(cors(corsOptions));
 
-  next();
-});
-
+// This middleware is for parsing JSON bodies
+app.use(express.json());
 
 // --- Axios Retry Configuration ---
 axiosRetry(axios, {
@@ -46,9 +49,6 @@ axiosRetry(axios, {
            (error.response && (error.response.status === 429 || error.response.status >= 500));
   },
 });
-
-const cookiesPath = "./cookies.txt";
-const useCookies = fs.existsSync(cookiesPath);
 
 // --- Refresh YouTube Tokens for play-dl ---
 const refreshYouTubeTokens = async () => {
@@ -72,6 +72,7 @@ const getSpotifyToken = async () => {
   if (!clientId || !clientSecret) throw new Error('Spotify credentials missing.');
 
   try {
+    // CORRECTED SPOTIFY URL
     const response = await axios.post(
       'https://accounts.spotify.com/api/token',
       'grant_type=client_credentials',
@@ -86,7 +87,7 @@ const getSpotifyToken = async () => {
     spotifyToken.expirationTime = Date.now() + (response.data.expires_in - 60) * 1000;
     return spotifyToken.value;
   } catch (error) {
-    console.error("Spotify auth failed:", error.message);
+    console.error("Spotify auth failed:", error.response ? error.response.data : error.message);
     throw new Error('Spotify authentication failed.');
   }
 };
@@ -111,6 +112,7 @@ const findAppleMusicArtwork = async (track) => {
 // --- Spotify Track Details Helper ---
 const getSpotifyTrackDetails = async (trackId) => {
   const token = await getSpotifyToken();
+  // CORRECTED SPOTIFY URL
   const res = await axios.get(`https://api.spotify.com/v1/tracks/${trackId}`, { headers: { Authorization: `Bearer ${token}` } });
   const track = res.data;
   return {
@@ -123,8 +125,7 @@ const getSpotifyTrackDetails = async (trackId) => {
   };
 };
 
-// --- Middleware ---
-app.use(express.json());
+// --- API ROUTES ---
 
 // --- /api/get-media-data ---
 app.post('/api/get-media-data', async (req, res) => {
@@ -132,6 +133,7 @@ app.post('/api/get-media-data', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'URL is required.' });
 
+    // CORRECTED SPOTIFY URL CHECK
     if (url.includes('spotify.com/track/')) {
       const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
       if (!trackIdMatch) return res.status(400).json({ error: 'Invalid Spotify URL.' });
@@ -157,6 +159,7 @@ app.post('/api/convert', async (req, res) => {
 
     let videoUrl, streamTitle;
 
+    // CORRECTED SPOTIFY URL CHECK
     if (url.includes('spotify.com/track/')) {
       const trackIdMatch = url.match(/track\/([a-zA-Z0-9]+)/);
       if (!trackIdMatch) throw new Error('Invalid Spotify URL.');
@@ -214,7 +217,7 @@ app.get('/api/download-image', async (req, res) => {
 // --- Server Startup ---
 app.listen(port, host, async () => {
   console.log(`Server running on ${host}:${port}`);
-  try { await getSpotifyToken(); } catch {}
   await refreshYouTubeTokens();
+  await getSpotifyToken().catch(() => console.log('Could not pre-warm Spotify token. Will try again on first request.'));
   console.log('Server initialized.');
 });

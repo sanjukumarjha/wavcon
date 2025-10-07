@@ -17,7 +17,6 @@ COPY package*.json ./
 
 RUN npm install -g npm@11.6.1
 
-# Install dependencies using clean install
 RUN npm ci --legacy-peer-deps
 
 # Copy the rest of the app

@@ -1,4 +1,4 @@
-# Use official Node.js sl
+# Use official Node.js
 FROM node:20-slim
 
 # In

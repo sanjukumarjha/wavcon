@@ -11,7 +11,12 @@ const { default: axiosRetry } = require('axios-retry');
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const port = process.env.PORT || 3001;
-const host = process.env.HOST || '0.0.0.0';
+const host = '0.0.0.0';
+app.listen(port, host, async () => {
+  console.log(`Server running on ${host}:${port}`);
+});
+
+
 
 // --- CORRECT AND FINAL CORS CONFIGURATION ---
 const allowedOrigins = [

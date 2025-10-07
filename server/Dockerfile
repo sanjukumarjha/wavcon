@@ -1,7 +1,7 @@
 # Use official Node.js slim image
 FROM node:20-slim
 
-# Ins
+# In
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \

@@ -185,7 +185,7 @@ app.post('/api/convert', async (req, res) => {
         const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
         ffmpeg(stream.stream)
             .audioBitrate(128)
-            .toFormat('wav')
+            .toFormat('wav)
             .audioFrequency(48000)
             .on('error', (err) => { console.error('FFMPEG ERROR:', err.message); if (!res.headersSent) res.status(500).send('Conversion error'); })
             .on('end', () => console.log(`[FFMPEG] Finished conversion: ${sanitizedTitle}`))
@@ -221,3 +221,4 @@ app.listen(port, host, async () => {
     await getSpotifyToken().catch(() => console.log('Could not pre-warm Spotify token. Will try again on first request.'));
     console.log('Server initialized.');
 });
+

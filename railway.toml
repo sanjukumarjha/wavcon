@@ -1,8 +1,0 @@
-[build]
-prebuild = "apt-get update && apt-get install -y python3 python3-pip"
-
-[deploy]
-start = "npm start"
-
-[env]
-PYTHON = "/usr/bin/python3"

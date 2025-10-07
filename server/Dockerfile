@@ -17,7 +17,7 @@ WORKDIR /app
 
 COPY package*.json ./
 
-# Install dependencies using clean install for production
+# Install dependencies using clean install 
 RUN npm ci --legacy-peer-deps
 
 # Copy the rest of the app source code

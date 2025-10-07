@@ -1,3 +1,0 @@
-# This file tells Railway to add Python to the server environment.
-[phases.setup]
-aptPkgs = ["python3"]

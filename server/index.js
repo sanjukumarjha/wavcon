@@ -124,6 +124,8 @@ const getSpotifyTrackDetails = async (trackId) => {
 // --- RAILWAY SPECIFIC: Health Check Route ---
 // This prevents the 502 errors by giving Railway a URL to check.
 app.get('/', (req, res) => {
+    // Added a log to confirm the health check is working
+    console.log('Health check endpoint hit successfully.'); 
     res.status(200).send('Server is healthy and running!');
 });
 
@@ -290,12 +292,13 @@ app.get('/api/download-image', async (req, res) => {
 // --- RAILWAY SPECIFIC: Server Startup ---
 // Listen on the correct host and port for Railway's network.
 app.listen(port, host, async () => {
-    console.log(`Server is running on ${host}:${port}`);
+    // Corrected the log message to be clear and accurate
+    console.log(`Server listening on port ${port}`);
     try {
         await getSpotifyToken();
     } catch (error) {
         console.error("Failed to pre-warm Spotify token, will try again on first request.");
     }
-    console.log("Server initialized and listening.");
+    console.log("Server initialized and ready.");
 });
 

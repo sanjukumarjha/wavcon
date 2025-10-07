@@ -1,4 +1,4 @@
-# Use official Node.js
+# Use official Node.
 FROM node:20-slim
 
 # In

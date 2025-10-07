@@ -13,7 +13,6 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 
 WORKDIR /app
 
-# Copy package files first to leverage Docker cache
 COPY package*.json ./
 
 RUN npm install -g npm@11.6.1

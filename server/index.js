@@ -10,8 +10,8 @@ const { default: axiosRetry } = require('axios-retry');
 
 // --- Basic Server Setup ---
 const app = express();
-const port = process.env.PORT || 3001; // Use lowercase 'port'
-const host = '0.0.0.0'; // Use lowercase 'host'
+const port = process.env.PORT || 3001;
+const host = '0.0.0.0';
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 // --- CORS Configuration ---
@@ -34,8 +34,8 @@ const corsOptions = {
 };
 
 // --- Middleware Setup (IN ORDER) ---
-app.use(cors(corsOptions)); // 1. Handle CORS
-app.use(express.json());   // 2. Parse JSON bodies
+app.use(cors(corsOptions));
+app.use(express.json());
 
 // --- Axios Global Configuration ---
 axiosRetry(axios, {
@@ -57,6 +57,7 @@ const refreshYouTubeTokens = async () => {
     console.log('YouTube client data refreshed.');
   } catch (error) {
     console.error('Failed to refresh YouTube client data:', error.message);
+    // We will let the startup continue, but YouTube features might be limited.
   }
 };
 
@@ -217,8 +218,16 @@ app.get('/api/download-image', async (req, res) => {
 // --- Server Startup (at the very end) ---
 app.listen(port, host, async () => {
     console.log(`Server running on ${host}:${port}`);
-    await refreshYouTubeTokens();
-    await getSpotifyToken().catch(() => console.log('Could not pre-warm Spotify token. Will try again on first request.'));
-    console.log('Server initialized.');
+    try {
+        await refreshYouTubeTokens();
+        await getSpotifyToken();
+        console.log('Server initialized successfully.');
+    } catch (error) {
+        console.error('!!! FATAL ERROR DURING STARTUP !!!');
+        console.error(error);
+        // Even with an error, we keep the server running so we can see logs.
+        // But we'll know initialization failed.
+        console.log('Server is running, but with initialization errors.');
+    }
 });
 

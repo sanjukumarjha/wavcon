@@ -1,4 +1,4 @@
-# Use official Node.js slim image
+# Use official Node.js slim ima
 FROM node:20-slim
 
 # In

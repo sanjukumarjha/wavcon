@@ -8,25 +8,13 @@ const axios = require('axios');
 require('dotenv').config();
 const { default: axiosRetry } = require('axios-retry');
 
-ffmpeg.setFfmpegPath(ffmpegPath);
+// --- Basic Server Setup ---
 const app = express();
+const port = process.env.PORT || 3001; // Use lowercase 'port'
+const host = '0.0.0.0'; // Use lowercase 'host'
+ffmpeg.setFfmpegPath(ffmpegPath);
 
-app.use(cors());
-app.use(express.json());
-const PORT = process.env.PORT || 3001; // Railway will automatically provide the port
-const HOST = '0.0.0.0';
-
-app.get('/', (req, res) => {
-  res.send('Server is running!');
-});
-
-app.listen(PORT, HOST, () => {
-  console.log(`Server running on ${HOST}:${PORT}`);
-});
-
-
-
-// --- CORRECT AND FINAL CORS CONFIGURATION ---
+// --- CORS Configuration ---
 const allowedOrigins = [
   'https://wavcon.vercel.app',
   'https://wavcon-p7nq9h39w-rjriva00-gmailcoms-projects.vercel.app'
@@ -45,68 +33,66 @@ const corsOptions = {
   credentials: true
 };
 
-// Use the cors middleware. This is the ONLY cors configuration you need.
-// It must be placed before your routes and app.use(express.json()).
-app.use(cors(corsOptions));
+// --- Middleware Setup (IN ORDER) ---
+app.use(cors(corsOptions)); // 1. Handle CORS
+app.use(express.json());   // 2. Parse JSON bodies
 
-// This middleware is for parsing JSON bodies
-app.use(express.json());
-
-
-// --- Axios Retry Configuration ---
+// --- Axios Global Configuration ---
 axiosRetry(axios, {
-    retries: 3,
-    retryDelay: axiosRetry.exponentialDelay,
-    retryCondition: (error) => {
-        return axiosRetry.isNetworkOrIdempotentRequestError(error) || 
-               (error.response && (error.response.status === 429 || error.response.status >= 500));
-    },
+  retries: 3,
+  retryDelay: axiosRetry.exponentialDelay,
+  retryCondition: (error) => {
+    return axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+           (error.response && (error.response.status === 429 || error.response.status >= 500));
+  },
 });
 
-// --- Refresh YouTube Tokens for play-dl ---
+
+// --- Helper Functions (YouTube & Spotify) ---
+
 const refreshYouTubeTokens = async () => {
-    try {
-        console.log('Refreshing YouTube client data...');
-        await play.getFreeClientID();
-        console.log('YouTube client data refreshed.');
-    } catch (error) {
-        console.error('Failed to refresh YouTube client data:', error.message);
-    }
+  try {
+    console.log('Refreshing YouTube client data...');
+    await play.getFreeClientID();
+    console.log('YouTube client data refreshed.');
+  } catch (error) {
+    console.error('Failed to refresh YouTube client data:', error.message);
+  }
 };
 
-// --- Spotify Token Management ---
 let spotifyToken = { value: null, expirationTime: 0 };
 
 const getSpotifyToken = async () => {
-    if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) return spotifyToken.value;
+  if (spotifyToken.value && Date.now() < spotifyToken.expirationTime) {
+    return spotifyToken.value;
+  }
 
-    console.log('Authenticating with Spotify...');
-    const clientId = process.env.SPOTIFY_CLIENT_ID;
-    const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
-    if (!clientId || !clientSecret) throw new Error('Spotify credentials missing.');
+  console.log('Authenticating with Spotify...');
+  const clientId = process.env.SPOTIFY_CLIENT_ID;
+  const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!clientId || !clientSecret) throw new Error('Spotify credentials missing.');
 
-    try {
-        const response = await axios.post(
-            'https://accounts.spotify.com/api/token',
-            'grant_type=client_credentials',
-            {
-                headers: {
-                    'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64'),
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-            }
-        );
-        spotifyToken.value = response.data.access_token;
-        spotifyToken.expirationTime = Date.now() + (response.data.expires_in - 60) * 1000;
-        console.log('Successfully authenticated with Spotify.');
-        return spotifyToken.value;
-    } catch (error) {
-        console.error("Spotify auth failed:", error.response ? error.response.data : error.message);
-        throw new Error('Spotify authentication failed.');
-    }
+  try {
+    const response = await axios.post(
+      'https://accounts.spotify.com/api/token',
+      'grant_type=client_credentials',
+      {
+        headers: {
+          'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64'),
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
+    );
+    spotifyToken.value = response.data.access_token;
+    spotifyToken.expirationTime = Date.now() + (response.data.expires_in - 60) * 1000;
+    console.log('Successfully authenticated with Spotify.');
+    return spotifyToken.value;
+  } catch (error) {
+    console.error("Spotify auth failed:", error.response ? error.response.data : error.message);
+    throw new Error('Spotify authentication failed.');
+  }
 };
 
-// --- Apple Music Artwork Helper ---
 const findAppleMusicArtwork = async (track) => {
     try {
         const upc = track.album?.external_ids?.upc;
@@ -123,7 +109,6 @@ const findAppleMusicArtwork = async (track) => {
     return null;
 };
 
-// --- Spotify Track Details Helper ---
 const getSpotifyTrackDetails = async (trackId) => {
     const token = await getSpotifyToken();
     const res = await axios.get(`https://api.spotify.com/v1/tracks/${trackId}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -138,9 +123,14 @@ const getSpotifyTrackDetails = async (trackId) => {
     };
 };
 
-// --- API ROUTES ---
 
-// --- /api/get-media-data ---
+// --- ROUTES ---
+
+// Health Check Route for Railway
+app.get('/', (req, res) => {
+  res.status(200).send('Server is healthy and running!');
+});
+
 app.post('/api/get-media-data', async (req, res) => {
     try {
         const { url } = req.body;
@@ -163,7 +153,6 @@ app.post('/api/get-media-data', async (req, res) => {
     }
 });
 
-// --- /api/convert ---
 app.post('/api/convert', async (req, res) => {
     try {
         const { url, title } = req.body;
@@ -208,7 +197,6 @@ app.post('/api/convert', async (req, res) => {
     }
 });
 
-// --- /api/download-image ---
 app.get('/api/download-image', async (req, res) => {
     const { url, title, type } = req.query;
     if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
@@ -226,7 +214,7 @@ app.get('/api/download-image', async (req, res) => {
 });
 
 
-// --- Server Startup ---
+// --- Server Startup (at the very end) ---
 app.listen(port, host, async () => {
     console.log(`Server running on ${host}:${port}`);
     await refreshYouTubeTokens();

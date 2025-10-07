@@ -16,7 +16,6 @@ WORKDIR /app
 # Copy package files first to leverage Docker cache
 COPY package*.json ./
 
-# Update npm to a stable version
 RUN npm install -g npm@11.6.1
 
 # Install dependencies using clean install

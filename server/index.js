@@ -185,7 +185,7 @@ app.post('/api/convert', async (req, res) => {
         const stream = await play.stream(videoUrl, { discordPlayerCompatibility: true });
         ffmpeg(stream.stream)
             .audioBitrate(128)
-            .toFormat('wav)
+            .toFormat('wav')
             .audioFrequency(48000)
             .on('error', (err) => { console.error('FFMPEG ERROR:', err.message); if (!res.headersSent) res.status(500).send('Conversion error'); })
             .on('end', () => console.log(`[FFMPEG] Finished conversion: ${sanitizedTitle}`))
@@ -201,7 +201,7 @@ app.get('/api/download-image', async (req, res) => {
     const { url, title, type } = req.query;
     if (!url || !title || !type) return res.status(400).json({ error: 'Missing parameters.' });
     try {
-        const sanitizedTitle = title.replace(/[^a-z0-9_-\s]/gi, '_').trim();
+        const sanitizedTitle = title.replace(/[^a-z0-N_-\s]/gi, '_').trim();
         const filename = `${sanitizedTitle}_${type}.jpg`;
         const response = await axios({ method: 'get', url: decodeURIComponent(url), responseType: 'stream' });
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

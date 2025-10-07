@@ -22,6 +22,6 @@ RUN npm ci --legacy-peer-deps
 # Copy the rest of the app
 COPY . .
 
-# Expose the port for Railway
+
 EXPOSE 3000  
 CMD ["node", "index.js"]

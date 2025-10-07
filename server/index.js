@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
-const play = require('play-dl'); // Using play-dl for all YouTube operations
+const play = require('play-dl');
 const fs = require('fs');
 const axios = require('axios');
 require('dotenv').config();
@@ -11,24 +11,43 @@ const { default: axiosRetry } = require('axios-retry');
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const port = process.env.PORT || 3001;
-const host = process.env.HOST || '0.0.0.0'; // Required for Railway deployment
+const host = process.env.HOST || '0.0.0.0';
 
-app.use(cors({
-  origin: 'https://wavcon.vercel.app'
-}));
+// --- CONSOLIDATED AND CORRECTED CORS CONFIGURATION ---
+
+// List of allowed domains
+const allowedOrigins = [
+  'https://wavcon.vercel.app', // Your production frontend
+  /https:\/\/wavcon-.*\.vercel\.app$/ // Regular expression for all Vercel preview URLs
+  // You could also add 'http://localhost:5173' for local testing if needed
+];
 
 const corsOptions = {
-    origin: 'https://wavcon.vercel.app', // Your frontend origin
-    methods: ['GET','POST','OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    // Check if the origin is in our allowed list
+    if (allowedOrigins.some(allowedOrigin => 
+        typeof allowedOrigin === 'string' ? allowedOrigin === origin : allowedOrigin.test(origin)
+    )) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 };
 
+// Use the single, correct CORS configuration for all requests
 app.use(cors(corsOptions));
 
-// Handle preflight requests for all routes
+// Explicitly handle preflight requests for all routes
 app.options('*', cors(corsOptions));
 
+// --- END OF CORS CONFIGURATION ---
 
 // Apply a global retry mechanism to all axios requests for stability
 axiosRetry(axios, {
@@ -234,4 +253,3 @@ app.listen(port, host, async () => {
     await refreshYouTubeTokens(); // Critical step for YouTube stability
     console.log("Server initialized and listening.");
 });
-
